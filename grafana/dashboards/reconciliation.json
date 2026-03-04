@@ -1,0 +1,360 @@
+{
+  "dashboard": {
+    "title": "Reconciliation Dashboard - Fintech Operations",
+    "description": "Nightly reconciliation monitoring: match rates, break categories, resolution times",
+    "tags": ["fintech", "reconciliation", "operations"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 0,
+    "refresh": "1m",
+    "time": {
+      "from": "now-7d",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Match Rate Trend (7 days)",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "time_series",
+            "rawQuery": true,
+            "query": "SELECT\n  run_date::timestamp as time,\n  ROUND(CAST(match_rate * 100 AS NUMERIC), 2) as match_rate_pct\nFROM reconciliation_runs\nWHERE run_date >= CURRENT_DATE - interval '7 days'\nORDER BY run_date DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 95
+                },
+                {
+                  "color": "green",
+                  "value": 98
+                }
+              ]
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              },
+              "lineWidth": 2,
+              "fillOpacity": 10
+            }
+          }
+        },
+        "options": {
+          "legend": {
+            "calcs": ["mean", "max", "min"],
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Today's Match Rate",
+        "type": "stat",
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  ROUND(CAST(match_rate * 100 AS NUMERIC), 2) as match_rate_pct\nFROM reconciliation_runs\nWHERE run_date = CURRENT_DATE\nORDER BY started_at DESC\nLIMIT 1"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 95
+                },
+                {
+                  "color": "green",
+                  "value": 98
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "textMode": "auto"
+        }
+      },
+      {
+        "id": 3,
+        "title": "Break Categories (Last 7 Days)",
+        "type": "piechart",
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  break_type,\n  COUNT(*) as count\nFROM reconciliation_exceptions\nWHERE created_at > CURRENT_DATE - interval '7 days'\nGROUP BY break_type\nORDER BY count DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        },
+        "options": {
+          "pieType": "donut",
+          "displayLabels": ["name", "percent"],
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": ["value"]
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Exception Resolution Time (hours)",
+        "type": "histogram",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  EXTRACT(EPOCH FROM (resolved_at - created_at)) / 3600.0 as resolution_hours\nFROM reconciliation_exceptions\nWHERE resolved = true\n  AND created_at > CURRENT_DATE - interval '7 days'\nORDER BY resolution_hours DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "h",
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Unmatched Amounts (Last 7 Days)",
+        "type": "stat",
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 12,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  SUM(total_unmatched_amount) as total_unmatched\nFROM reconciliation_runs\nWHERE run_date >= CURRENT_DATE - interval '7 days'"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 100
+                },
+                {
+                  "color": "red",
+                  "value": 1000
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Critical Exceptions (Unresolved)",
+        "type": "stat",
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 18,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  COUNT(*) as critical_count\nFROM reconciliation_exceptions\nWHERE priority = 'critical'\n  AND resolved = false"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Match Type Distribution (Last Run)",
+        "type": "barchart",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  match_status,\n  COUNT(*) as count\nFROM reconciliation_matches\nWHERE reconciliation_run_id = (\n  SELECT run_id FROM reconciliation_runs ORDER BY started_at DESC LIMIT 1\n)\nGROUP BY match_status\nORDER BY count DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Reconciliation Run History",
+        "type": "table",
+        "gridPos": {
+          "h": 10,
+          "w": 24,
+          "x": 0,
+          "y": 24
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  run_id,\n  run_date,\n  ROUND(CAST(match_rate * 100 AS NUMERIC), 2) as match_rate_pct,\n  exact_matches,\n  fuzzy_matches,\n  auto_resolved,\n  exceptions,\n  unmatched,\n  ROUND(CAST(total_unmatched_amount AS NUMERIC), 2) as total_unmatched,\n  EXTRACT(EPOCH FROM (completed_at - started_at)) as duration_seconds\nFROM reconciliation_runs\nWHERE run_date >= CURRENT_DATE - interval '7 days'\nORDER BY run_date DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

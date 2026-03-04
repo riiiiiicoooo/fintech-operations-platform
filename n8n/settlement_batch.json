@@ -1,0 +1,226 @@
+{
+  "name": "Daily Settlement Batch Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "trigger": "at",
+        "hour": 18,
+        "minute": 0,
+        "timezone": "America/New_York"
+      },
+      "id": "node_cron_trigger",
+      "name": "Cron: Daily 6 PM ET",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1.0,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "settlement/batch/trigger",
+        "responseMode": "onReceived"
+      },
+      "id": "node_trigger_settlement",
+      "name": "POST to Trigger.dev",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300],
+      "credentials": {
+          "httpHeaderAuth": "trigger_dev_auth"
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.trigger.dev/v1/runs/{{ $json.body.run_id }}",
+        "authentication": "headerAuth",
+        "options": {
+          "returnFullResponse": true
+        }
+      },
+      "id": "node_poll_settlement_status",
+      "name": "Poll Settlement Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300],
+      "credentials": {
+          "httpHeaderAuth": "trigger_dev_auth"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "value1": "={{ $json.body.status }}",
+              "condition": "=",
+              "value2": "COMPLETED"
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node_check_success",
+      "name": "Check Settlement Success",
+      "type": "n8n-nodes-base.ifV2",
+      "typeVersion": 1.2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "settlement@fintech-ops.example.com",
+        "fromName": "Settlement Engine",
+        "toEmail": "finance-team@example.com",
+        "subject": "Daily Settlement Completed - {{ $json.body.settlement_date }}",
+        "emailType": "html",
+        "htmlEmail": "=<h2>Settlement Batch Confirmation</h2>\n<p><strong>Date:</strong> {{ $json.body.settlement_date }}</p>\n<p><strong>Batch ID:</strong> {{ $json.body.batch_id }}</p>\n<p><strong>Transactions:</strong> {{ $json.body.transaction_count }}</p>\n<p><strong>Gross Amount:</strong> ${{ $json.body.gross_amount }}</p>\n<p><strong>Platform Fees:</strong> ${{ $json.body.platform_fees }}</p>\n<p><strong>Net Payout:</strong> ${{ $json.body.net_payout }}</p>\n<p>Settlement submitted successfully to bank at {{ $json.body.submitted_at }}</p>"
+      },
+      "id": "node_email_success",
+      "name": "Email Settlement Confirmation",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1.0,
+      "position": [1050, 200],
+      "credentials": {
+          "smtp": "resend_smtp"
+      }
+    },
+    {
+      "parameters": {
+        "channel": "payments-ops",
+        "text": "=:white_check_mark: Settlement batch completed\n\nBatch: {{ $json.body.batch_id }}\nTransactions: {{ $json.body.transaction_count }}\nNet Payout: ${{ $json.body.net_payout }}\nStatus: Successfully submitted to bank"
+      },
+      "id": "node_slack_success",
+      "name": "Slack Success Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1050, 300],
+      "credentials": {
+          "slackApi": "slack_creds"
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@fintech-ops.example.com",
+        "fromName": "Fintech Ops Alerts",
+        "toEmail": "payments-team@example.com",
+        "subject": "URGENT: Settlement Batch Failed - {{ $json.body.batch_id }}",
+        "emailType": "html",
+        "htmlEmail": "=<h2>Settlement Batch Failed</h2>\n<p><strong>Batch ID:</strong> {{ $json.body.batch_id }}</p>\n<p><strong>Error:</strong> {{ $json.body.error_message }}</p>\n<p><strong>Time:</strong> {{ $json.body.failed_at }}</p>\n<p>IMMEDIATE ACTION REQUIRED: Review settlement job and retry manually</p>\n<p><a href='https://trigger.dev/runs/{{ $json.body.run_id }}'>View Job Details</a></p>"
+      },
+      "id": "node_email_failure",
+      "name": "Email Escalation (Payments Team)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1.0,
+      "position": [1050, 450],
+      "credentials": {
+          "smtp": "resend_smtp"
+      }
+    },
+    {
+      "parameters": {
+        "channel": "payments-ops",
+        "text": "=:x: Settlement batch FAILED - Escalating\n\nBatch: {{ $json.body.batch_id }}\nError: {{ $json.body.error_message }}\n\n@payments-team - immediate attention required"
+      },
+      "id": "node_slack_failure",
+      "name": "Slack Escalation Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1050, 550],
+      "credentials": {
+          "slackApi": "slack_creds"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "projectIdType": "id",
+        "projectId": "=PROJECT_KEY",
+        "summary": "Settlement Batch Failed - {{ $json.body.batch_id }}",
+        "description": "=Settlement batch failed during processing\n\nBatch ID: {{ $json.body.batch_id }}\nError: {{ $json.body.error_message }}\nJob Run: https://trigger.dev/runs/{{ $json.body.run_id }}\n\nImmediate retry may be required.",
+        "issueType": "Task",
+        "priority": "Highest"
+      },
+      "id": "node_jira_escalation",
+      "name": "Create Jira Escalation Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 2.0,
+      "position": [1050, 600],
+      "credentials": {
+          "jiraSoftwareCloudApi": "jira_creds"
+      }
+    }
+  ],
+  "connections": {
+    "node_cron_trigger": {
+      "main": [
+        [
+          {
+            "node": "node_trigger_settlement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_trigger_settlement": {
+      "main": [
+        [
+          {
+            "node": "node_poll_settlement_status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_poll_settlement_status": {
+      "main": [
+        [
+          {
+            "node": "node_check_success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_check_success": {
+      "main": [
+        [
+          {
+            "node": "node_email_success",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "node_slack_success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "node_email_failure",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "node_slack_failure",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "node_jira_escalation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a2f1e7c4-9d3b-4e6f-c1a2-3b5f8e1d4c7a"
+}

@@ -1,0 +1,301 @@
+# Fintech Operations Platform - Cursor Rules
+
+## Project Context
+Fintech operations platform for B2B2C earned wage access. Core responsibilities:
+- Double-entry ledger with strict invariants (SUM debits = SUM credits)
+- Multi-PSP payment routing with health scoring and circuit breakers
+- Nightly three-way reconciliation (ledger ↔ PSP ↔ bank)
+- Fraud detection via rule engine and velocity checks
+- Compliance workflows (KYC/AML/SAR)
+- NACHA batch settlement generation
+- Settlement automation via Trigger.dev
+
+## Architecture Pillars
+
+### 1. Ledger Invariants
+- Every transaction is a double-entry journal entry BEFORE any external API call
+- Balance = SUM(debits) - SUM(credits) for asset/expense accounts
+- Balance = SUM(credits) - SUM(debits) for liability/revenue accounts
+- All ledger writes use SERIALIZABLE isolation
+- Idempotency keys prevent duplicate entries
+- Journal entries are immutable (append-only log)
+
+### 2. Multi-PSP Routing
+- Primary/fallback pattern with health scoring
+- Health score = 0.4×success_rate + 0.3×latency + 0.2×error_rate + 0.1×uptime
+- Circuit breaker: ≥5 failures in 60s → open
+- Retry logic: attempt 1 (primary), wait 1s, attempt 2 (primary), wait 4s, attempt 3 (fallback)
+- All PSP calls include idempotency key
+
+### 3. Reconciliation
+- Three-way match: internal ledger ↔ PSP records ↔ bank statement
+- Match hierarchy: exact → fuzzy (within tolerance) → many-to-one → flag break
+- Auto-resolve known patterns: timing (T+1 settlement), batching, rounding, fee deduction
+- Break types: timing, fee_deduction, fx_rounding, quantity, missing, duplicate
+- Target: 98%+ match rate, <0.5% exceptions requiring manual review
+
+### 4. Compliance
+- Row-level security: finance team sees all, operations sees transactions only, compliance sees audit logs
+- KYC tiers: none, basic ($500/month), standard ($5K/month), enhanced (unlimited)
+- Transaction monitoring: velocity checks, amount limits, off-hours activity
+- SAR triggers: cumulative $5K+ from known suspicious indicators, structured deposits, smurfing patterns
+- Immutable compliance event log with hash chain for audit integrity
+
+## Technology Stack
+
+### Backend
+- **Language**: Python 3.11+
+- **Database**: PostgreSQL 15+ with SERIALIZABLE isolation for ledger writes
+- **ORM**: SQLAlchemy with psycopg2 for connection pooling
+- **API**: FastAPI with async handlers
+- **Queue**: Celery with Redis (for async settlement/reconciliation jobs)
+- **Webhooks**: Svix or custom webhook handler
+
+### Infrastructure
+- **Deployment**: Docker + Kubernetes (or Render/Railway for MVP)
+- **Monitoring**: Prometheus + Grafana dashboards
+- **Alerting**: PagerDuty for production incidents
+- **Secrets**: HashiCorp Vault (or cloud-native secret manager)
+- **Logging**: ELK stack with structured JSON logging
+
+### Integrations
+- **Stripe**: Primary PSP for ACH/card payments (Stripe Connect for marketplace payouts)
+- **Adyen**: Secondary PSP for card payments and fallback
+- **Banking**: Plaid for bank statement ingestion, direct API for settlement
+- **Email**: Resend for transactional emails
+- **Workflow**: n8n for low-code workflows (reconciliation alerting, settlement batch)
+- **Jobs**: Trigger.dev for long-running jobs with checkpointing (settlement, reconciliation)
+- **Project Management**: Jira/Linear integration for break exceptions
+- **Metrics**: Grafana Cloud for dashboards and alerting
+
+## Code Organization
+
+```
+fintech-operations-platform/
+├── supabase/migrations/           # PostgreSQL migration files
+├── src/
+│   ├── ledger/                    # Double-entry engine
+│   ├── payments/                  # PSP routing, payment orchestration
+│   ├── settlement/                # Settlement batching, NACHA generation
+│   ├── reconciliation/            # Three-way matching logic
+│   ├── fraud/                     # Rule-based fraud detection
+│   ├── compliance/                # KYC, AML, transaction monitoring
+│   ├── models/                    # SQLAlchemy ORM models
+│   ├── webhooks/                  # Stripe, Adyen, bank webhooks
+│   └── utils/                     # Idempotency, retry logic, formatters
+├── trigger-jobs/                  # Trigger.dev jobs (TypeScript)
+├── n8n/                           # n8n workflow definitions
+├── stripe/                        # Stripe Connect integration
+├── emails/                        # React Email templates
+├── grafana/                       # Dashboard JSON definitions
+├── tests/                         # Unit/integration tests
+├── docs/                          # Product docs
+├── Dockerfile                     # Containerization
+├── docker-compose.yml             # Local development
+├── .cursorrules                   # This file
+├── .replit                        # Replit configuration
+├── replit.nix                     # Nix dependencies
+├── vercel.json                    # Vercel deployment (if using Functions)
+├── .env.example                   # Environment variables template
+└── README.md                      # Updated with modern stack
+```
+
+## Key Implementation Patterns
+
+### Ledger Writes
+```python
+# All ledger operations use SERIALIZABLE isolation
+from sqlalchemy import event, text
+
+def post_journal_entry(db: Session, entry_data: JournalEntryCreate) -> str:
+    """
+    Post a journal entry with double-entry invariant check.
+    Uses SERIALIZABLE isolation to prevent concurrent writes.
+    """
+    # Check idempotency key first (fast path)
+    existing = db.query(JournalEntry).filter(
+        JournalEntry.idempotency_key == entry_data.idempotency_key
+    ).first()
+    if existing:
+        return existing.entry_id
+
+    # All ledger writes: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    with db.begin_nested():  # Savepoint for rollback
+        entry = JournalEntry(
+            entry_id=generate_entry_id(),
+            entry_type=entry_data.entry_type,
+            idempotency_key=entry_data.idempotency_key,
+            description=entry_data.description,
+            metadata=entry_data.metadata
+        )
+        db.add(entry)
+        db.flush()
+
+        total_debits = Decimal(0)
+        total_credits = Decimal(0)
+
+        for line_data in entry_data.lines:
+            line = JournalEntryLine(
+                entry_id=entry.entry_id,
+                account_id=line_data.account_id,
+                debit=line_data.debit,
+                credit=line_data.credit
+            )
+            db.add(line)
+            total_debits += line.debit
+            total_credits += line.credit
+
+        # Invariant check
+        if total_debits != total_credits:
+            raise ValueError(f"Unbalanced: debits={total_debits}, credits={total_credits}")
+
+        db.commit()
+
+    return entry.entry_id
+```
+
+### PSP Routing
+```python
+def select_psp(payment_method: str, amount: Decimal, user_risk_tier: str) -> str:
+    """
+    Select PSP based on method, amount, and health scores.
+    Returns primary or fallback based on circuit breaker state.
+    """
+    primary_psp = METHOD_ROUTING[payment_method]["primary"]
+    fallback_psp = METHOD_ROUTING[payment_method]["fallback"]
+
+    primary_health = calculate_health_score(primary_psp)
+    fallback_health = calculate_health_score(fallback_psp)
+
+    if primary_health > 0.8:
+        return primary_psp
+    elif fallback_health > 0.8:
+        return fallback_psp
+    else:
+        raise Exception("All PSPs unhealthy - circuit breaker OPEN")
+```
+
+### Reconciliation Matching
+```python
+def reconcile_three_way(
+    run_id: str,
+    ledger_records: List[LedgerRecord],
+    psp_records: List[PSPRecord],
+    bank_records: List[BankRecord]
+) -> ReconciliationResult:
+    """
+    Three-way matching: ledger ↔ PSP ↔ bank statement.
+    Hierarchy: exact match → fuzzy match → many-to-one → exception.
+    """
+    # Step 1: Match ledger ↔ PSP
+    ledger_psp_matches = match_exact_and_fuzzy(ledger_records, psp_records)
+    unmatched_ledger = [r for r in ledger_records if not any(
+        m.ledger_id == r.id for m in ledger_psp_matches
+    )]
+
+    # Step 2: Match PSP ↔ Bank
+    psp_bank_matches = match_exact_and_fuzzy(psp_records, bank_records)
+
+    # Step 3: Auto-resolve known patterns
+    for match in ledger_psp_matches + psp_bank_matches:
+        if is_auto_resolvable(match):
+            match.status = "auto_resolved"
+            match.resolution_notes = get_break_pattern_reason(match)
+
+    return ReconciliationResult(
+        total_exact=len([m for m in ledger_psp_matches if m.match_type == "exact"]),
+        total_fuzzy=len([m for m in ledger_psp_matches if m.match_type == "fuzzy"]),
+        total_exceptions=len([m for m in ledger_psp_matches if m.status == "exception"])
+    )
+```
+
+## Database Partitioning Strategy
+
+Partition `journal_entry_lines` by month for high-volume table:
+```sql
+-- Quarterly partitions
+CREATE TABLE journal_entry_lines_2024_q1 PARTITION OF journal_entry_lines
+    FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
+```
+
+## Fraud Rule Thresholds
+
+- Velocity: >5 txns/hour = +25 pts, >$2K/24h = +20 pts, >10 txns/24h = +15 pts
+- Amount: >3x user avg = +20 pts, round amount = +5 pts, near limit = +10 pts
+- Context: new device = +15 pts, unusual geo = +15 pts, off-hours = +10 pts, new user = +20 pts
+- Decision: score <30 = APPROVE, 30-70 = REVIEW, >70 = DECLINE
+- Allowlist: score = 0 (bypass)
+- Blocklist: score = 100 (auto-decline)
+
+## Compliance Rules
+
+- Basic KYC: name, email, phone, DOB (enables $500/month limit)
+- Standard KYC: ID verification + address (enables $5K/month)
+- Enhanced KYC: source of funds documentation (enables unlimited)
+- Transaction monitoring: cumulative $5K from suspicious patterns
+- SAR filing: coordinated with legal, 30-day deadline after detection
+
+## Testing Strategy
+
+- Unit tests: ledger invariants, fraud scoring, reconciliation matching
+- Integration tests: end-to-end payment flow, settlement batching
+- Load tests: 1K TPS sustained on payment endpoint
+- Chaos tests: PSP failover, network latency injection
+- Compliance tests: KYC/AML workflow coverage
+
+## Deployment Checklist
+
+- [ ] Database migrations applied (supabase CLI or Flyway)
+- [ ] Feature flags enabled for multi-PSP routing
+- [ ] Grafana dashboards provisioned and alerting enabled
+- [ ] Stripe/Adyen API keys in Vault, not .env
+- [ ] n8n workflows published (reconciliation alerting, settlement batch)
+- [ ] Trigger.dev jobs deployed (settlement, reconciliation)
+- [ ] Webhook endpoints whitelisted in Stripe/Adyen console
+- [ ] PagerDuty integration configured for critical alerts
+- [ ] Load test run: verify 1K TPS target
+- [ ] Chaos test: PSP failover simulation
+- [ ] Finance team trained on exception resolution workflow
+
+## Performance SLOs
+
+- Payment endpoint: p95 latency <200ms, 99.5% availability
+- Ledger query (balance check): <50ms p95
+- Reconciliation run: completes within 1 hour
+- Settlement batch generation: <10 minutes for 100K txns
+- Exception alerting: <5 min from detection to Slack/email
+
+## Security Checklist
+
+- [ ] All PSP API keys rotated quarterly
+- [ ] Database backups encrypted at rest and in transit
+- [ ] PII (PAN, SSN) encrypted with AES-256, keys in Vault
+- [ ] Audit logs signed with HMAC-SHA256 for integrity
+- [ ] RLS enabled for multi-tenant isolation (if applicable)
+- [ ] Rate limiting on all public endpoints (1K req/min per IP)
+- [ ] SQL injection prevention via parameterized queries
+- [ ] CORS configured to allow only frontend domain
+- [ ] Webhook signature verification (Stripe, Adyen, bank)
+
+## Debugging Commands
+
+```bash
+# Check ledger balance for user
+psql -c "SELECT * FROM user_balances WHERE user_id = 'user_123';"
+
+# Find unmatched reconciliation records
+psql -c "SELECT * FROM reconciliation_matches WHERE match_status = 'exception' ORDER BY created_at DESC LIMIT 20;"
+
+# Check PSP health score
+psql -c "SELECT psp_name, success_rate, p95_latency FROM psp_health_scores ORDER BY health_score DESC;"
+
+# Monitor fraud decisions in real time
+psql -c "SELECT user_id, normalized_score, decision, rules_triggered FROM risk_scores WHERE created_at > now() - interval '1 hour' ORDER BY created_at DESC;"
+```
+
+## References
+
+- [Ledger Design](docs/LEDGER_DESIGN.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Compliance Framework](docs/COMPLIANCE_FRAMEWORK.md)
+- [Decision Log](docs/DECISION_LOG.md)

@@ -1,0 +1,12 @@
+run = "python api/app.py"
+entrypoint = "api/app.py"
+
+[env]
+PYTHONUNBUFFERED = "1"
+
+[[ports]]
+int = 8000
+expose = true
+
+[nix]
+channel = "stable-23.11"

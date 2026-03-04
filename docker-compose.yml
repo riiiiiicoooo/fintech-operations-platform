@@ -1,0 +1,80 @@
+# Docker Compose: Fintech Operations Platform Stack
+
+version: '3.8'
+
+services:
+  # ========================================================================
+  # PostgreSQL: Main data store
+  # ========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: fintech_postgres
+    environment:
+      POSTGRES_USER: fintech
+      POSTGRES_PASSWORD: fintech_password
+      POSTGRES_DB: fintech_ops
+      POSTGRES_INITDB_ARGS: "-c max_connections=100 -c shared_buffers=256MB"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintech"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fintech_network
+
+  # ========================================================================
+  # Redis: Caching and idempotency
+  # ========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: fintech_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass redis_password
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fintech_network
+
+  # ========================================================================
+  # FastAPI Application
+  # ========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fintech_api
+    environment:
+      DATABASE_URL: postgresql://fintech:fintech_password@postgres:5432/fintech_ops
+      REDIS_URL: redis://:redis_password@redis:6379/0
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+    networks:
+      - fintech_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  fintech_network:
+    driver: bridge

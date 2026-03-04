@@ -1,0 +1,383 @@
+{
+  "dashboard": {
+    "title": "Transaction Pipeline - Fintech Operations",
+    "description": "Real-time monitoring of payment processing pipeline: success rates, latency, PSP health",
+    "tags": ["fintech", "payments", "operations"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 0,
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Transaction Success Rate (24h)",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "time_series",
+            "rawQuery": true,
+            "query": "SELECT\n  time_bucket('5 minutes', posted_at) as time,\n  COUNT(CASE WHEN status = 'succeeded' THEN 1 END)::float / COUNT(*) as success_rate\nFROM transactions\nWHERE posted_at > now() - interval '24 hours'\nGROUP BY time\nORDER BY time DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1,
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              },
+              "lineWidth": 2,
+              "fillOpacity": 0
+            }
+          }
+        },
+        "options": {
+          "legend": {
+            "calcs": ["mean", "max", "min"],
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "PSP Health Scores",
+        "type": "gauge",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  psp_name,\n  health_score * 100 as health_score\nFROM psp_health_scores\nWHERE updated_at > now() - interval '5 minutes'\nORDER BY health_score DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 80
+                },
+                {
+                  "color": "green",
+                  "value": 95
+                }
+              ]
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Transaction Latency (p50, p95, p99)",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "time_series",
+            "rawQuery": true,
+            "query": "SELECT\n  time_bucket('5 minutes', posted_at) as time,\n  percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms) as p50,\n  percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) as p95,\n  percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms) as p99\nFROM transactions\nWHERE posted_at > now() - interval '24 hours'\n  AND latency_ms > 0\nGROUP BY time\nORDER BY time DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "ms",
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              },
+              "lineWidth": 2,
+              "fillOpacity": 0
+            }
+          }
+        },
+        "options": {
+          "legend": {
+            "calcs": ["mean", "max"],
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Error Rate by PSP",
+        "type": "barchart",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  psp_name,\n  COUNT(CASE WHEN status IN ('failed', 'declined') THEN 1 END)::float / COUNT(*) * 100 as error_rate,\n  COUNT(*) as transaction_count\nFROM transactions\nWHERE posted_at > now() - interval '24 hours'\nGROUP BY psp_name\nORDER BY error_rate DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 2
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        },
+        "options": {
+          "orient": "auto",
+          "showLegend": true,
+          "text": {}
+        }
+      },
+      {
+        "id": 5,
+        "title": "Transaction Status Distribution (Last Hour)",
+        "type": "piechart",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  status,\n  COUNT(*) as count\nFROM transactions\nWHERE posted_at > now() - interval '1 hour'\nGROUP BY status\nORDER BY count DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        },
+        "options": {
+          "pieType": "donut",
+          "displayLabels": ["name", "percent"],
+          "legend": {
+            "displayMode": "table",
+            "placement": "right"
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Daily Transaction Volume",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT COUNT(*) as transaction_count FROM transactions WHERE posted_at::date = CURRENT_DATE"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area"
+        }
+      },
+      {
+        "id": 7,
+        "title": "Fraud Detection Rate",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  COUNT(CASE WHEN decision IN ('review', 'decline') THEN 1 END)::float / COUNT(*) * 100 as fraud_detection_rate\nFROM risk_scores\nWHERE created_at > now() - interval '24 hours'"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 3
+                },
+                {
+                  "color": "green",
+                  "value": 5
+                }
+              ]
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Circuit Breaker Status",
+        "type": "table",
+        "gridPos": {
+          "h": 6,
+          "w": 24,
+          "x": 0,
+          "y": 20
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "rawQuery": true,
+            "query": "SELECT\n  psp_name,\n  circuit_breaker_status,\n  failure_count_60s,\n  ROUND(CAST(health_score * 100 AS NUMERIC), 2) as health_score_pct,\n  ROUND(CAST(success_rate * 100 AS NUMERIC), 2) as success_rate_pct,\n  ROUND(CAST(p95_latency_ms AS NUMERIC), 0) as p95_latency_ms,\n  updated_at\nFROM psp_health_scores\nORDER BY updated_at DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

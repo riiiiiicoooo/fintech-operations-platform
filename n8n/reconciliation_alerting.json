@@ -1,0 +1,245 @@
+{
+  "name": "Reconciliation Alerting Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "reconciliation/webhook",
+        "responseMode": "onReceived"
+      },
+      "id": "node_webhook_trigger",
+      "name": "Supabase Reconciliation Webhook",
+      "type": "n8n-nodes-base.httpNodeListener",
+      "typeVersion": 1.0,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "run_id",
+              "value": "={{ $json.body.record.run_id }}"
+            },
+            {
+              "name": "exceptions",
+              "value": "={{ $json.body.record.exceptions }}"
+            },
+            {
+              "name": "unmatched",
+              "value": "={{ $json.body.record.unmatched }}"
+            },
+            {
+              "name": "total_unmatched_amount",
+              "value": "={{ $json.body.record.total_unmatched_amount }}"
+            }
+          ]
+        },
+        "authentication": "bearerAuth",
+        "method": "POST",
+        "url": "=https://{{ $credentials.supabase_project_id }}.supabase.co/rest/v1/reconciliation_exceptions?select=*"
+      },
+      "id": "node_fetch_exceptions",
+      "name": "Fetch Exception Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300],
+      "credentials": {
+          "supabaseApi": "supabase_creds"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "value1": "={{ $json.body.record.exceptions }}",
+              "condition": ">",
+              "value2": 5
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node_check_threshold",
+      "name": "Check Exception Threshold",
+      "type": "n8n-nodes-base.ifV2",
+      "typeVersion": 1.2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "projectIdType": "id",
+        "projectId": "=PROJECT_KEY",
+        "summary": "=Reconciliation Breaks Detected - {{ $json.body.record.run_id }}",
+        "description": "=Exception Count: {{ $json.body.record.exceptions }}\nUnmatched Records: {{ $json.body.record.unmatched }}\nTotal Unmatched Amount: ${{ $json.body.record.total_unmatched_amount }}\n\nReview details at: https://fintech-ops.example.com/reconciliation/{{ $json.body.record.run_id }}/exceptions",
+        "issueType": "Task",
+        "priority": "={{ $json.body.record.exceptions > 20 ? 'Highest' : ($json.body.record.exceptions > 10 ? 'High' : 'Medium') }}"
+      },
+      "id": "node_jira_ticket",
+      "name": "Create Jira Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 2.0,
+      "position": [850, 200],
+      "credentials": {
+          "jiraSoftwareCloudApi": "jira_creds"
+      }
+    },
+    {
+      "parameters": {
+        "channel": "payments-ops",
+        "text": "=:warning: Reconciliation breaks detected\n\nRun: <https://fintech-ops.example.com/reconciliation/{{ $json.body.record.run_id }}|{{ $json.body.record.run_id }}>\nBreaks: {{ $json.body.record.exceptions }}\nUnmatched: ${{ $json.body.record.total_unmatched_amount }}\n\nTriage in Jira: <https://jira.example.com/browse/FINOPS-{{ $json.id }}|FINOPS-{{ $json.id }}>",
+        "otherOptions": {}
+      },
+      "id": "node_slack_alert",
+      "name": "Slack Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [850, 350],
+      "credentials": {
+          "slackApi": "slack_creds"
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@fintech-ops.example.com",
+        "fromName": "Fintech Ops Alerts",
+        "toEmail": "finance-team@example.com",
+        "subject": "Reconciliation Alert: {{ $json.body.record.exceptions }} breaks detected",
+        "emailType": "html",
+        "htmlEmail": "=<h2>Reconciliation Run: {{ $json.body.record.run_id }}</h2>\n<p><strong>Exception Count:</strong> {{ $json.body.record.exceptions }}</p>\n<p><strong>Unmatched Records:</strong> {{ $json.body.record.unmatched }}</p>\n<p><strong>Total Unmatched Amount:</strong> ${{ $json.body.record.total_unmatched_amount }}</p>\n<p><a href='https://fintech-ops.example.com/reconciliation/{{ $json.body.record.run_id }}/exceptions'>View Details</a></p>"
+      },
+      "id": "node_email_alert",
+      "name": "Email Finance Team (Resend)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1.0,
+      "position": [850, 500],
+      "credentials": {
+          "smtp": "resend_smtp"
+      }
+    },
+    {
+      "parameters": {
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "run_id",
+              "value": "={{ $json.body.record.run_id }}"
+            },
+            {
+              "name": "alert_sent_at",
+              "value": "=NOW()"
+            },
+            {
+              "name": "jira_ticket_id",
+              "value": "={{ $json.id }}"
+            }
+          ]
+        },
+        "authentication": "bearerAuth",
+        "method": "PATCH",
+        "url": "=https://{{ $credentials.supabase_project_id }}.supabase.co/rest/v1/reconciliation_runs?run_id=eq.{{ $json.body.record.run_id }}"
+      },
+      "id": "node_update_dashboard",
+      "name": "Update Dashboard Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 350],
+      "credentials": {
+          "supabaseApi": "supabase_creds"
+      }
+    }
+  ],
+  "connections": {
+    "node_webhook_trigger": {
+      "main": [
+        [
+          {
+            "node": "node_fetch_exceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_fetch_exceptions": {
+      "main": [
+        [
+          {
+            "node": "node_check_threshold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_check_threshold": {
+      "main": [
+        [
+          {
+            "node": "node_jira_ticket",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "node_slack_alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "node_email_alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "node_update_dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_jira_ticket": {
+      "main": [
+        [
+          {
+            "node": "node_update_dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_slack_alert": {
+      "main": [
+        [
+          {
+            "node": "node_update_dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "node_email_alert": {
+      "main": [
+        [
+          {
+            "node": "node_update_dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c3985d9e-3f1e-4c7f-b6a9-2d1f5e8c4b2a"
+}

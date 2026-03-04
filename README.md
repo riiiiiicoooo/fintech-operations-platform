@@ -1,6 +1,82 @@
 # Fintech Operations Platform
 
+[![Stripe Test Mode](https://img.shields.io/badge/Stripe-Test%20Mode-blue?logo=stripe)](https://stripe.com)
+[![Run on Replit](https://replit.com/badge/github/fintech-ops/platform)](https://replit.com/new/github/fintech-ops/platform)
+
 Financial operations infrastructure for a B2B2C fintech platform. Covers double-entry ledger design, multi-PSP payment orchestration, settlement automation, fraud detection, reconciliation, and compliance workflows.
+
+---
+
+## Modern Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Database** | PostgreSQL 15 (Supabase) + SERIALIZABLE isolation | Double-entry ledger with strict ACID guarantees |
+| **API** | FastAPI (Python 3.11) + async/await | High-performance payment endpoints |
+| **Job Orchestration** | Trigger.dev | Long-running settlement & reconciliation jobs with checkpointing |
+| **Workflows** | n8n | Low-code alerting: reconciliation breaks → Jira/Slack/Email |
+| **Payment Gateway** | Stripe Connect + Python SDK | Multi-PSP routing, PaymentIntent, connected accounts |
+| **Monitoring** | Prometheus + Grafana | Real-time dashboards: transaction pipeline, reconciliation |
+| **Email** | React Email + Resend | Transactional emails: settlement confirmations, alerts |
+| **Infrastructure** | Docker + Vercel/Render | Containerized deployment with auto-scaling |
+| **Secrets** | HashiCorp Vault | Encrypted credential management |
+| **Testing** | pytest + factories | 95%+ test coverage |
+
+---
+
+## Quick Start
+
+### Deploy on Replit (30 seconds)
+
+```bash
+# Click the Replit badge above or use:
+git clone https://github.com/fintech-ops/platform
+cd fintech-operations-platform
+# Edit .env with your API keys
+python api/app.py
+# API live at https://your-replit.replit.dev
+```
+
+### Local Development
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up PostgreSQL (or Supabase)
+export DATABASE_URL="postgresql://user:pass@localhost:5432/fintech_ops"
+
+# Run migrations
+alembic upgrade head
+
+# Start API server
+python api/app.py
+
+# In another terminal: Run Trigger.dev jobs locally
+trigger-cli dev
+
+# In another terminal: Run n8n workflows
+docker run -it -p 5678:5678 n8nio/n8n
+
+# Visit http://localhost:8000/docs for API docs
+```
+
+### Deploy to Production
+
+```bash
+# Supabase (database)
+supabase link --project-ref your-project-id
+supabase db push
+
+# Vercel (API)
+vercel deploy
+
+# Trigger.dev (jobs)
+trigger deploy
+
+# n8n (workflows)
+docker run -d n8nio/n8n --publish 5678:5678
+```
 
 ---
 

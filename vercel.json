@@ -1,0 +1,114 @@
+{
+  "version": 2,
+  "buildCommand": "pip install -r requirements.txt && python -m pytest tests/ -v",
+  "env": {
+    "DATABASE_URL": {
+      "description": "PostgreSQL connection string (Supabase)",
+      "required": true
+    },
+    "STRIPE_API_KEY": {
+      "description": "Stripe API key (sk_live_... or sk_test_...)",
+      "required": true
+    },
+    "STRIPE_WEBHOOK_SECRET": {
+      "description": "Stripe webhook endpoint secret",
+      "required": true
+    },
+    "REDIS_URL": {
+      "description": "Redis connection string for queues",
+      "required": true
+    },
+    "TRIGGER_DEV_API_KEY": {
+      "description": "Trigger.dev API key for job orchestration",
+      "required": true
+    },
+    "N8N_API_KEY": {
+      "description": "n8n API key for workflow automation",
+      "required": false
+    },
+    "GRAFANA_API_KEY": {
+      "description": "Grafana API key for dashboard provisioning",
+      "required": false
+    },
+    "JIRA_API_TOKEN": {
+      "description": "Jira API token for ticket creation",
+      "required": false
+    },
+    "SLACK_BOT_TOKEN": {
+      "description": "Slack bot token for notifications",
+      "required": false
+    },
+    "RESEND_API_KEY": {
+      "description": "Resend API key for transactional emails",
+      "required": true
+    },
+    "VAULT_ADDR": {
+      "description": "HashiCorp Vault server address",
+      "required": false
+    },
+    "VAULT_TOKEN": {
+      "description": "Vault authentication token",
+      "required": false
+    },
+    "LOG_LEVEL": {
+      "description": "Logging level (DEBUG, INFO, WARNING, ERROR)",
+      "required": false,
+      "default": "INFO"
+    },
+    "ENVIRONMENT": {
+      "description": "Deployment environment (development, staging, production)",
+      "required": true
+    }
+  },
+  "functions": {
+    "api/**": {
+      "runtime": "python3.11",
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/health"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/:path*",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-XSS-Protection",
+          "value": "1; mode=block"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=31536000; includeSubDomains"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'"
+        }
+      ]
+    }
+  ],
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/health",
+      "permanent": false
+    }
+  ]
+}
