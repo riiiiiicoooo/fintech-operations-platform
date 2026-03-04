@@ -450,3 +450,33 @@ As PM, I wrote these prototypes to:
 3. **Communicate fraud logic to engineering** using working rule engine code rather than spreadsheets of threshold values
 4. **Demo reconciliation matching** to the finance ops team using real PSP export files to validate match rates before building the production pipeline
 5. **Inform compliance requirements** by prototyping KYC tier logic and transaction monitoring rules with the legal team to confirm regulatory coverage
+
+---
+
+## Engagement & Budget
+
+### Team & Timeline
+
+| Role | Allocation | Duration |
+|------|-----------|----------|
+| Lead PM (Jacob) | 25 hrs/week | 20 weeks |
+| Lead Developer (US) | 40 hrs/week | 20 weeks |
+| Offshore Developer(s) | 3 × 35 hrs/week | 20 weeks |
+| QA Engineer | 25 hrs/week | 20 weeks |
+
+**Timeline:** 20 weeks total across 3 phases
+- **Phase 1: Discovery & Design** (4 weeks) — Payment flow mapping, ledger architecture, PSP integration requirements, compliance (PCI DSS, KYB), fraud rule definition
+- **Phase 2: Core Build** (11 weeks) — Double-entry ledger engine, payment orchestrator, multi-PSP routing, settlement reconciliation, fraud detection pipeline
+- **Phase 3: Integration & Launch** (5 weeks) — Stripe Connect integration, three-way reconciliation testing, load testing (10K txn/day), compliance audit prep, staged production rollout
+
+### Budget Summary
+
+| Category | Cost | Notes |
+|----------|------|-------|
+| PM & Strategy | $92,500 | Discovery, specs, stakeholder management |
+| Development (Lead + Offshore) | $232,800 | Core platform build |
+| QA | $17,500 | Quality assurance and testing |
+| AI/LLM Token Budget | $280/month | Minimal AI — fraud scoring uses scikit-learn not LLMs, some Claude Haiku for pattern summarization ~2M tokens/month |
+| Infrastructure | $890/month | Supabase Pro $25 + Temporal Cloud $200 + Redis $65 + n8n $50 + Trigger.dev $25 + AWS (RDS, compute, S3) $350 + Grafana $50 + misc $125 |
+| **Total Engagement** | **$345,000** | Fixed-price, phases billed at milestones |
+| **Ongoing Run Rate** | **$1,400/month** | Infrastructure + AI tokens + support + Stripe Connect fees (0.25% + $0.25 per payout, variable) |
