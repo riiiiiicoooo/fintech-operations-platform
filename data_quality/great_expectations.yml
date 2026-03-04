@@ -1,0 +1,85 @@
+# Great Expectations Project Configuration
+# Fintech Operations Platform - Settlement and reconciliation data quality
+
+config_version: 3.0
+
+datasources:
+  snowflake_datasource:
+    class_name: Datasource
+    execution_engine:
+      class_name: SqlAlchemyExecutionEngine
+      module_name: great_expectations.execution_engine
+      sqlalchemy_engine:
+        class_name: SqlAlchemyEngine
+        module_name: great_expectations.execution_engine
+        create_engine_kwargs:
+          url: "snowflake://${SNOWFLAKE_USER}:${SNOWFLAKE_PASSWORD}@${SNOWFLAKE_ACCOUNT}/FINTECH_OPS_DB/PUBLIC?warehouse=${SNOWFLAKE_WAREHOUSE}"
+          echo: false
+          pool_size: 10
+          max_overflow: 20
+          pool_timeout: 30
+
+    data_connectors:
+      # Connector for settlement transactions
+      settlement_connector:
+        class_name: SqlAlchemyDataConnector
+        module_name: great_expectations.datasource.data_connector.sqlalchemy_data_connector
+        include_schema_name: true
+        schemas:
+          - public
+
+      # Connector for reconciliation results
+      reconciliation_connector:
+        class_name: SqlAlchemyDataConnector
+        module_name: great_expectations.datasource.data_connector.sqlalchemy_data_connector
+        include_schema_name: true
+        schemas:
+          - public
+
+stores:
+  expectations_store:
+    class_name: ExpectationsStore
+    store_backend:
+      class_name: TupleFilesystemStoreBackend
+      base_directory: expectations/
+
+  validations_store:
+    class_name: ValidationsStore
+    store_backend:
+      class_name: TupleFilesystemStoreBackend
+      base_directory: uncommitted/validations/
+
+  checkpoint_store:
+    class_name: CheckpointStore
+    store_backend:
+      class_name: TupleFilesystemStoreBackend
+      base_directory: checkpoints/
+
+validation_operators:
+  action_list_operator:
+    class_name: ActionListValidationOperator
+    action_list:
+      - name: store_validation_result
+        action:
+          class_name: StoreValidationResultAction
+
+notifier_config:
+  module_name: great_expectations.core.usage_statistics
+  action_list:
+    - name: send_email_notification
+      action:
+        class_name: EmailNotificationAction
+        smtp_config:
+          host: ${SMTP_HOST}
+          port: 587
+          username: ${SMTP_USERNAME}
+          password: ${SMTP_PASSWORD}
+        receiver_emails:
+          - fintech-ops@company.com
+          - compliance@company.com
+        notify_on: all
+
+checkpoint_default_actions:
+  - name: store_validation_result
+    action:
+      class_name: StoreValidationResultAction

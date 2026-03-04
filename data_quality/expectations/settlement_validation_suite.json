@@ -1,0 +1,200 @@
+{
+  "expectation_suite_name": "settlement_validation_suite",
+  "meta": {
+    "great_expectations_version": "0.17.0",
+    "description": "Settlement transaction data quality validation. Critical for regulatory compliance and audit trails. Validates before settlement batch execution.",
+    "data_asset_type": "Table",
+    "table_name": "settlement_transactions",
+    "regulatory_context": "SOX, PCI-DSS - Data must be validated before settlement finality"
+  },
+  "expectations": [
+    {
+      "expectation_type": "expect_table_to_exist",
+      "kwargs": {
+        "table": "settlement_transactions"
+      }
+    },
+    {
+      "expectation_type": "expect_table_columns_to_match_set",
+      "kwargs": {
+        "column_set": [
+          "transaction_id",
+          "amount",
+          "currency",
+          "settlement_date",
+          "status",
+          "settlement_batch_id",
+          "counterparty_id",
+          "created_at",
+          "settled_at"
+        ]
+      },
+      "meta": {
+        "description": "Validate required settlement columns are present",
+        "severity": "critical",
+        "alert_on": "Schema mismatch - critical for compliance reporting"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "transaction_id"
+      },
+      "meta": {
+        "description": "transaction_id is unique identifier required for audit",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "amount"
+      },
+      "meta": {
+        "description": "Settlement amount must always be present",
+        "severity": "critical",
+        "alert_on": "Null amounts could indicate data pipeline failure"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "currency"
+      },
+      "meta": {
+        "description": "Currency code required for multi-currency processing",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "settlement_date"
+      },
+      "meta": {
+        "description": "Settlement date required for T+N settlement processing",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "amount",
+        "min_value": 0.01,
+        "max_value": 10000000,
+        "result_format": "SUMMARY"
+      },
+      "meta": {
+        "description": "Transaction amounts should be in reasonable range ($0.01 - $10M)",
+        "severity": "high",
+        "alert_on_min": "Amounts < $0.01 may be invalid",
+        "alert_on_max": "Amounts > $10M require additional verification (fraud detection)"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "currency",
+        "value_set": [
+          "USD",
+          "EUR",
+          "GBP",
+          "CAD",
+          "JPY",
+          "CHF",
+          "AUD"
+        ]
+      },
+      "meta": {
+        "description": "Currency must be supported currency code for FX conversion",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "status",
+        "value_set": [
+          "pending",
+          "settled",
+          "failed",
+          "reversed",
+          "on_hold"
+        ]
+      },
+      "meta": {
+        "description": "Settlement status must be valid state",
+        "severity": "critical",
+        "alert_on": "Invalid status indicates data corruption or pipeline error"
+      }
+    },
+    {
+      "expectation_type": "expect_column_pair_values_a_to_be_greater_than_b",
+      "kwargs": {
+        "column_A": "settled_at",
+        "column_B": "created_at"
+      },
+      "meta": {
+        "description": "settled_at must be after created_at (logical ordering)",
+        "severity": "critical",
+        "alert_on": "Time inversion indicates data corruption"
+      }
+    },
+    {
+      "expectation_type": "expect_select_column_values_to_be_unique_within_record",
+      "kwargs": {
+        "column_list": [
+          "transaction_id",
+          "settlement_batch_id"
+        ]
+      },
+      "meta": {
+        "description": "Composite key uniqueness - no duplicate settlement records",
+        "severity": "critical",
+        "alert_on": "Duplicates could lead to double-settlement (regulatory violation)"
+      }
+    },
+    {
+      "expectation_type": "expect_table_row_count_to_be_between",
+      "kwargs": {
+        "min_value": 1,
+        "max_value": 1000000
+      },
+      "meta": {
+        "description": "Settlement batch should have reasonable transaction count",
+        "severity": "high",
+        "alert_on_min": "Batch with 0 transactions indicates pipeline issue",
+        "alert_on_max": "Batch > 1M transactions may indicate uncontrolled growth"
+      }
+    },
+    {
+      "expectation_type": "expect_column_proportion_of_unique_values_to_be_between",
+      "kwargs": {
+        "column": "transaction_id",
+        "min_value": 0.99,
+        "max_value": 1.0
+      },
+      "meta": {
+        "description": "Nearly all transaction_ids should be unique (> 99%)",
+        "severity": "critical",
+        "alert_on": "High cardinality check for duplicate detection"
+      }
+    },
+    {
+      "expectation_type": "expect_column_distinct_values_to_be_in_set",
+      "kwargs": {
+        "column": "status",
+        "value_set": [
+          "pending",
+          "settled",
+          "failed",
+          "reversed"
+        ]
+      },
+      "meta": {
+        "description": "Only expected statuses should appear in settlement data",
+        "severity": "high"
+      }
+    }
+  ]
+}

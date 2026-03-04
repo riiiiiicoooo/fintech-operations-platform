@@ -1,0 +1,116 @@
+# Great Expectations Checkpoint Configuration
+# Fintech Operations Platform - Pre-settlement validation
+
+name: pre_settlement_check
+description: Critical validation before every settlement batch execution. Prevents invalid or corrupt data from being settled.
+
+# Validation targets
+validations:
+  # Settlement transaction validation (critical - runs first)
+  - expectation_suite_name: settlement_validation_suite
+    data_assets:
+      - name: settlement_transactions
+        batch_request:
+          datasource_name: snowflake_datasource
+          data_connector_name: settlement_connector
+          data_asset_name: settlement_transactions
+          batch_filter_parameters:
+            status: ["pending", "on_hold"]  # Only validate transactions not yet settled
+    meta:
+      run_name: "pre_settlement_validation"
+      critical_gate: true  # Blocks settlement if this fails
+      sla_max_duration_seconds: 300
+
+  # Reconciliation health check (ensures prior recon passed)
+  - expectation_suite_name: reconciliation_health_suite
+    data_assets:
+      - name: reconciliation_results
+        batch_request:
+          datasource_name: snowflake_datasource
+          data_connector_name: reconciliation_connector
+          data_asset_name: reconciliation_results
+          batch_filter_parameters:
+            lookback_hours: 4  # Check most recent reconciliation
+    meta:
+      run_name: "pre_settlement_reconciliation_check"
+      critical_gate: false  # Non-blocking warning if recon shows issues
+
+# Actions on validation completion
+action_list:
+  # Store results for audit trail
+  - name: store_validation_result
+    action:
+      class_name: StoreValidationResultAction
+
+  # Halt settlement on critical failure
+  - name: halt_settlement_on_failure
+    action:
+      class_name: CustomAction
+      action_module: fintech_ops.quality_actions
+      action_class_name: HaltSettlementAction
+      trigger_on_failure: true
+      custom_config:
+        notification_channels: [pagerduty, email]
+        escalation_policy: "fintech-incident"
+
+  # Send detailed email on failure
+  - name: send_failure_notification
+    action:
+      class_name: EmailNotificationAction
+      smtp_config:
+        host: ${SMTP_HOST}
+        port: 587
+        username: ${SMTP_USERNAME}
+        password: ${SMTP_PASSWORD}
+      receiver_emails:
+        - fintech-ops@company.com
+        - compliance@company.com
+        - cfo@company.com
+      notify_on:
+        - failure
+      include_config: true
+      include_result_statement: true
+      include_expectation_details: true
+      subject_template: "ALERT: Settlement validation failed - batch cannot proceed"
+
+  # Log detailed validation to Snowflake for compliance
+  - name: log_to_compliance_table
+    action:
+      class_name: CustomAction
+      action_module: fintech_ops.quality_actions
+      action_class_name: LogToComplianceTableAction
+      target_table: compliance_logs.validation_history
+      include_full_result: true
+
+  # Update status dashboard
+  - name: update_settlement_dashboard
+    action:
+      class_name: CustomAction
+      action_module: fintech_ops.quality_actions
+      action_class_name: UpdateSettlementDashboardAction
+      dashboard_id: "settlement-operations"
+
+# Execution schedule
+schedule:
+  # This is manually triggered before each settlement batch
+  # But can also be scheduled for regulatory reporting
+  enabled: false
+  trigger_on_demand: true
+  max_retries: 0  # Do not auto-retry - requires manual investigation
+
+# Metadata for compliance/audit
+meta:
+  version: "1.0"
+  regulatory_context: "SOX, PCI-DSS"
+  owner: "Fintech Operations"
+  critical_path: true
+  sla:
+    max_duration_minutes: 5
+    must_complete_before: "settlement_execution"
+  audit_trail: true
+  documentation:
+    - "Blocks settlement if any critical validation fails"
+    - "Validates transaction data integrity and amount ranges"
+    - "Ensures recent reconciliation passed (within 4 hours)"
+    - "Compliance requirement: logged for regulatory reporting"
+    - "PagerDuty escalation on failure"

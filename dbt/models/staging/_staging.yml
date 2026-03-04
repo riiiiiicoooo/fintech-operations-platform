@@ -1,0 +1,107 @@
+version: 2
+
+sources:
+  - name: raw
+    database: FINTECH_OPS
+    schema: RAW
+    tables:
+      - name: transactions
+        description: Raw payment transaction records from multiple payment processors
+        columns:
+          - name: transaction_id
+            description: Unique transaction identifier
+            tests:
+              - unique
+              - not_null
+
+      - name: settlements
+        description: Raw settlement batch records from payment processors
+        columns:
+          - name: settlement_id
+            description: Unique settlement batch identifier
+            tests:
+              - unique
+              - not_null
+
+      - name: reconciliation
+        description: Raw reconciliation run records and matching results
+        columns:
+          - name: reconciliation_id
+            description: Unique reconciliation run identifier
+            tests:
+              - unique
+              - not_null
+
+models:
+  - name: stg_transactions
+    description: Cleaned transaction records with normalized amounts and timing metrics
+    columns:
+      - name: transaction_id
+        description: Unique transaction identifier (primary key)
+        tests:
+          - unique
+          - not_null
+      - name: merchant_id
+        description: Foreign key to merchant entity
+      - name: payment_processor_id
+        description: Payment processor identifier
+      - name: transaction_type_normalized
+        description: Standardized transaction type (PAYMENT, REFUND, CHARGEBACK, etc.)
+        tests:
+          - accepted_values:
+              values: ['PAYMENT', 'REFUND', 'CHARGEBACK', 'SETTLEMENT', 'ADJUSTMENT', 'UNKNOWN']
+      - name: amount_usd
+        description: Transaction amount normalized to USD
+      - name: processing_time_ms
+        description: Time from creation to settlement in milliseconds
+      - name: transaction_outcome
+        description: Transaction outcome classification
+        tests:
+          - accepted_values:
+              values: ['SUCCESS', 'FAILED', 'PENDING', 'UNKNOWN']
+
+  - name: stg_settlements
+    description: Cleaned settlement batch records with timeliness and efficiency metrics
+    columns:
+      - name: settlement_id
+        description: Unique settlement batch identifier (primary key)
+        tests:
+          - unique
+          - not_null
+      - name: payment_processor_id
+        description: Payment processor identifier
+      - name: settlement_batch_date
+        description: Date settlement batch was processed
+      - name: total_settlement_amount
+        description: Total amount in settlement batch (USD)
+      - name: transaction_count
+        description: Number of transactions in batch
+      - name: settlement_delay_days
+        description: Days from period end to batch settlement
+      - name: settlement_timeliness
+        description: Settlement timeliness classification
+        tests:
+          - accepted_values:
+              values: ['TIMELY', 'DELAYED', 'SIGNIFICANTLY_DELAYED']
+
+  - name: stg_reconciliation
+    description: Cleaned reconciliation records with match rates and exception tracking
+    columns:
+      - name: reconciliation_id
+        description: Unique reconciliation run identifier (primary key)
+        tests:
+          - unique
+          - not_null
+      - name: settlement_id
+        description: Settlement batch being reconciled
+      - name: match_rate_pct
+        description: Percentage of transactions matched (0-100%)
+      - name: exception_count
+        description: Number of reconciliation exceptions
+      - name: unmatched_amount
+        description: Total unmatched amount in USD
+      - name: reconciliation_health_status
+        description: Reconciliation health classification
+        tests:
+          - accepted_values:
+              values: ['HEALTHY', 'ACCEPTABLE', 'AT_RISK', 'CRITICAL']

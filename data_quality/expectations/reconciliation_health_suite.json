@@ -1,0 +1,206 @@
+{
+  "expectation_suite_name": "reconciliation_health_suite",
+  "meta": {
+    "great_expectations_version": "0.17.0",
+    "description": "Reconciliation process health validation. Monitors match rates, exception counts, and processing times. Alerts on quality degradation before it impacts operations.",
+    "data_asset_type": "Table",
+    "table_name": "reconciliation_results",
+    "sla_context": "Reconciliation must complete within 1 hour (3600 seconds) with match rate >= 95%"
+  },
+  "expectations": [
+    {
+      "expectation_type": "expect_table_to_exist",
+      "kwargs": {
+        "table": "reconciliation_results"
+      }
+    },
+    {
+      "expectation_type": "expect_table_columns_to_match_set",
+      "kwargs": {
+        "column_set": [
+          "run_id",
+          "started_at",
+          "completed_at",
+          "match_rate",
+          "exception_count",
+          "processing_time_seconds",
+          "status",
+          "source_system",
+          "target_system"
+        ]
+      },
+      "meta": {
+        "description": "Verify reconciliation run schema",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "run_id"
+      },
+      "meta": {
+        "description": "run_id is unique identifier for reconciliation execution",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "started_at"
+      },
+      "meta": {
+        "description": "Started timestamp required for SLA monitoring",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "completed_at"
+      },
+      "meta": {
+        "description": "Completed timestamp required for duration tracking",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "match_rate"
+      },
+      "meta": {
+        "description": "Match rate critical for identifying reconciliation issues",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "match_rate",
+        "min_value": 0.95,
+        "max_value": 1.0,
+        "result_format": "SUMMARY"
+      },
+      "meta": {
+        "description": "Match rate must be >= 95% (SLA threshold). Below indicates data sync issues.",
+        "severity": "critical",
+        "alert_on": "Match rate < 95% requires immediate investigation",
+        "escalation": "Page ops team if < 90%"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "exception_count",
+        "min_value": 0,
+        "max_value": 100,
+        "result_format": "SUMMARY"
+      },
+      "meta": {
+        "description": "Exception count should be low. High counts indicate systemic mismatches.",
+        "severity": "high",
+        "alert_on": "Exceptions > 100 requires investigation",
+        "escalation": "Check data sync between source and target systems"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "processing_time_seconds",
+        "min_value": 0,
+        "max_value": 3600,
+        "result_format": "SUMMARY"
+      },
+      "meta": {
+        "description": "Reconciliation must complete within 1 hour (3600 sec) SLA",
+        "severity": "high",
+        "alert_on": "Duration > 1 hour violates SLA",
+        "escalation": "Investigate performance if approaching 3600s limit"
+      }
+    },
+    {
+      "expectation_type": "expect_column_max_to_be_between",
+      "kwargs": {
+        "column": "processing_time_seconds",
+        "min_value": 0,
+        "max_value": 3600
+      },
+      "meta": {
+        "description": "Maximum processing time must not exceed SLA (3600s)",
+        "severity": "critical",
+        "alert_on": "Any reconciliation run exceeding 3600s violates SLA"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "status",
+        "value_set": [
+          "success",
+          "success_with_exceptions",
+          "failure",
+          "timeout"
+        ]
+      },
+      "meta": {
+        "description": "Reconciliation run status must be valid",
+        "severity": "high"
+      }
+    },
+    {
+      "expectation_type": "expect_column_pair_values_a_to_be_greater_than_b",
+      "kwargs": {
+        "column_A": "completed_at",
+        "column_B": "started_at"
+      },
+      "meta": {
+        "description": "Completed must be after started (logical time ordering)",
+        "severity": "critical"
+      }
+    },
+    {
+      "expectation_type": "expect_table_row_count_to_be_between",
+      "kwargs": {
+        "min_value": 1,
+        "max_value": 1000
+      },
+      "meta": {
+        "description": "Daily reconciliation runs (typically 1 per day, up to several per day)",
+        "severity": "medium"
+      }
+    },
+    {
+      "expectation_type": "expect_column_distinct_values_to_be_in_set",
+      "kwargs": {
+        "column": "source_system",
+        "value_set": [
+          "internal_ledger",
+          "settlement_engine",
+          "custody_system",
+          "trading_platform"
+        ]
+      },
+      "meta": {
+        "description": "Source system must be one of known systems",
+        "severity": "high"
+      }
+    },
+    {
+      "expectation_type": "expect_column_distinct_values_to_be_in_set",
+      "kwargs": {
+        "column": "target_system",
+        "value_set": [
+          "bank_feed",
+          "custodian_feed",
+          "regulatory_report",
+          "client_reporting"
+        ]
+      },
+      "meta": {
+        "description": "Target system for reconciliation must be known",
+        "severity": "high"
+      }
+    }
+  ]
+}

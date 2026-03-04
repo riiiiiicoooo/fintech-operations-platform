@@ -1,0 +1,67 @@
+version: 2
+
+models:
+  - name: fct_daily_settlement
+    description: Daily settlement and transaction performance metrics aggregated by day
+    columns:
+      - name: metric_date
+        description: Date of settlement metrics
+        tests:
+          - not_null
+      - name: daily_transaction_count
+        description: Total transactions processed on the day
+      - name: daily_successful_transactions
+        description: Count of successful transactions
+      - name: daily_failed_transactions
+        description: Count of failed transactions
+      - name: daily_success_rate_pct
+        description: Percentage of successful transactions (0-100%)
+      - name: avg_processing_time_ms
+        description: Average transaction processing time in milliseconds
+      - name: p95_processing_time_ms
+        description: 95th percentile processing time in milliseconds
+      - name: p99_processing_time_ms
+        description: 99th percentile processing time in milliseconds
+      - name: daily_avg_match_rate_pct
+        description: Average reconciliation match rate for the day
+      - name: daily_total_exceptions
+        description: Total reconciliation exceptions on the day
+      - name: daily_operational_health
+        description: Overall operational health classification
+        tests:
+          - accepted_values:
+              values: ['EXCELLENT', 'GOOD', 'ACCEPTABLE', 'PROBLEM']
+
+  - name: fct_reconciliation_health
+    description: Reconciliation trend analysis with exception tracking and processor health
+    columns:
+      - name: reconciliation_run_date
+        description: Date reconciliation was run
+        tests:
+          - not_null
+      - name: settlement_batch_date
+        description: Settlement batch date being reconciled
+      - name: payment_processor_id
+        description: Payment processor identifier
+      - name: match_rate_pct
+        description: Percentage of transactions matched in reconciliation
+      - name: rolling_7day_match_rate_pct
+        description: 7-day rolling average match rate
+      - name: match_rate_trend
+        description: Match rate trend direction
+        tests:
+          - accepted_values:
+              values: ['IMPROVING', 'DECLINING', 'STABLE']
+      - name: exception_count
+        description: Number of reconciliation exceptions
+      - name: exception_severity
+        description: Severity classification of exceptions
+        tests:
+          - accepted_values:
+              values: ['NO_EXCEPTIONS', 'MINOR_EXCEPTIONS', 'MODERATE_EXCEPTIONS', 'MAJOR_EXCEPTIONS']
+      - name: unmatched_amount
+        description: Total unmatched amount in USD
+      - name: reconciliation_health_status
+        description: Health classification of reconciliation
+      - name: processor_health_score
+        description: Processor health score (0-100)
