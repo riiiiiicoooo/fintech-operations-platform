@@ -651,7 +651,7 @@ def example_integration():
 
     # Initialize client
     client = StripeConnectClient(
-        api_key="sk_live_your_key_here",
+        api_key="YOUR_STRIPE_API_KEY",
         test_mode=False,
     )
 
