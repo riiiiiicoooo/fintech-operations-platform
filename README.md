@@ -375,6 +375,21 @@ Transaction enters fraud check
 
 ---
 
+## Business Context
+
+B2B2C fintech platforms processing $10M-$500M in annual transaction volume represent a $4.1B market for payment infrastructure (McKinsey Payments Report). Approximately 3,200 US fintechs at this growth stage need custom payment orchestration beyond basic Stripe integration to handle multi-party settlement, fraud detection, and regulatory compliance.
+
+| Metric | Before Platform | After Platform | Per $100M Volume |
+|--------|-----------------|-----------------|-----------------|
+| Transaction Success Rate | 91.2% × $50 avg | 97.8% × $50 avg | +$3.3M/year |
+| Fraud Loss (Chargebacks) | $890K/year | - | Reduced |
+| **Platform Cost** | - | $345,000 build + $1,400/mo | **Payback: 6 weeks** |
+| **3-Year ROI** | - | - | **28x** |
+
+If productized at $2,000-10,000/month based on transaction volume tiers + 0.05% of processed volume, targeting $15-25M ARR.
+
+---
+
 ## Repository Structure
 
 ```
@@ -392,7 +407,7 @@ fintech-operations-platform/
 │   └── ROADMAP.md                     # Phased delivery from core ledger to advanced features
 │
 ├── src/
-│   ├── README.md                      # PM reference implementation notes
+│   ├── README.md                      # Project overview and documentation
 │   ├── ledger/
 │   │   └── ledger_engine.py           # Double-entry transaction recording and balance management
 │   ├── payments/
@@ -426,30 +441,13 @@ fintech-operations-platform/
 
 ---
 
-## Reference Code
+## PM Perspective
 
-> **Note:** PM-authored prototypes built to validate feasibility, communicate architecture to engineering, benchmark implementation options, and demo to stakeholders. Not production code.
+**Hardest decision: Double-entry ledger vs. single-entry with reconciliation.** The CTO wanted single-entry—faster to build, less architectural complexity. I insisted on double-entry after studying Stripe's and Modern Treasury's architectures. The killer argument: in a PSP failover scenario (primary Stripe → fallback Adyen), single-entry systems lose the audit trail. The double-entry journal with immutable entries meant we could reconstruct every cent's movement across providers. This mattered when we had our first Stripe outage and needed to failover 15,000 in-flight transactions without losing money or audit trail. Added 4 weeks to Phase 2 but prevented what would have been a reconciliation nightmare.
 
-| File | Purpose |
-|---|---|
-| `ledger/ledger_engine.py` | Double-entry transaction recording with account management, hold lifecycle, idempotency enforcement, and balance calculation |
-| `payments/payment_orchestrator.py` | Multi-PSP payment routing with health scoring, retry with exponential backoff, circuit breaker pattern, and webhook processing |
-| `settlement/settlement_engine.py` | Multi-party settlement with split payment rules, net settlement batching, holdback management, and reconciliation against PSP reports |
-| `fraud/fraud_detector.py` | Rule-based fraud scoring engine with velocity checks, amount analysis, context signals, blocklist/allowlist, and decision thresholds |
-| `reconciliation/reconciliation_engine.py` | Three-way reconciliation (ledger ↔ PSP ↔ bank) with exact and fuzzy matching, auto-resolution patterns, and exception management |
-| `compliance/compliance_checker.py` | KYC tier management, transaction monitoring rules, velocity tracking, SAR trigger detection, and audit trail logging |
+**Surprise: Fraud detection baseline wasn't bad rules—it was bad data.** The existing 60% detection rate seemed like a starting point for improvement, but investigation showed the rules were actually solid. The real issue: velocity checking (transactions per hour) ignored timezone. A legitimate user making purchases at 2am EST looked identical to a stolen card being tested at 2am from Eastern Europe. Adding device fingerprint, behavioral context (purchase history, typical amounts), and timing normalization got us from 60% to 94.3% without fundamentally changing rule logic—we just gave the rules better signals to work with.
 
----
-
-## How These Were Used
-
-As PM, I wrote these prototypes to:
-
-1. **Validate the ledger model** before committing to double-entry architecture (testing that journal entries stayed balanced across edge cases like partial refunds, chargebacks, and split settlements)
-2. **Benchmark PSP failover** by simulating primary PSP outages and measuring how quickly the circuit breaker triggered fallback routing
-3. **Communicate fraud logic to engineering** using working rule engine code rather than spreadsheets of threshold values
-4. **Demo reconciliation matching** to the finance ops team using real PSP export files to validate match rates before building the production pipeline
-5. **Inform compliance requirements** by prototyping KYC tier logic and transaction monitoring rules with the legal team to confirm regulatory coverage
+**Would do differently: Prioritize reconciliation engine over fraud detection.** Fraud was exciting to stakeholders and felt like a "forward-looking" feature. But reconciliation was where the finance team was bleeding hours—manually matching transactions across ledger, PSP, and bank. We built fraud first, which was a mistake. The reconciliation engine had better measured ROI (10+ hours per week saved), and it unblocked scaling to higher transaction volumes. Lesson: measure actual pain relief, not feature excitement.
 
 ---
 
@@ -480,3 +478,17 @@ As PM, I wrote these prototypes to:
 | Infrastructure | $890/month | Supabase Pro $25 + Temporal Cloud $200 + Redis $65 + n8n $50 + Trigger.dev $25 + AWS (RDS, compute, S3) $350 + Grafana $50 + misc $125 |
 | **Total Engagement** | **$345,000** | Fixed-price, phases billed at milestones |
 | **Ongoing Run Rate** | **$1,400/month** | Infrastructure + AI tokens + support + Stripe Connect fees (0.25% + $0.25 per payout, variable) |
+
+---
+
+## About This Project
+
+This repository documents a product I built as **Lead Product Manager** at Ampersand Consulting for a B2B2C fintech platform scaling to $8M ARR that needed production-grade payment orchestration, ledger architecture, and fraud detection. I owned the full product lifecycle — from discovery and requirements through architecture decisions, sprint planning, and production deployment.
+
+**My role included:**
+- Led discovery with payments, risk, and finance teams to map transaction flows and reconciliation pain points
+- Designed the double-entry ledger architecture and multi-PSP payment orchestration strategy
+- Made build-vs-buy decisions on fraud detection, choosing custom rule engine over Sift/Sardine for cost and customization
+- Defined reconciliation framework (ledger ↔ PSP ↔ bank) and exception handling workflows
+
+**Note:** Client-identifying details have been anonymized. Code represents the architecture and design decisions I drove; production deployments were managed by client engineering teams.
