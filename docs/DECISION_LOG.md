@@ -308,3 +308,23 @@ This document captures key product and technical decisions, what alternatives we
 - The dollar threshold is necessary but not sufficient. Auto-resolution requires BOTH a delta under $5.00 AND a matching pattern (timing, fee deduction, batch netting, or rounding). A $3.00 delta with no matching pattern is NOT auto-resolved.
 
 **Consequence:** After tuning the auto-resolution patterns and adopting the $5.00 threshold, the reconciliation exception count dropped from ~35 per run to ~8 per run. Diana (Finance Ops) went from spending 3 hours reviewing exceptions to 45 minutes. Weekly audit of auto-resolved items confirmed zero false resolutions in 90 days.
+
+---
+
+## DEC-013: Asynchronous Fraud Scoring with Hold-and-Review Over Real-Time Inline Scoring
+
+**Date:** February 2025
+**Status:** Accepted (supersedes earlier approach)
+**Decider:** PM + Fraud Analyst + Engineering Lead
+
+**Context:** V1 implemented real-time inline fraud scoring — every transaction was scored synchronously before processing. The fraud model ran on each payment request, returning a risk score that determined approve/decline/review.
+
+**What Happened:** p95 latency on the checkout flow jumped from 1.2s to 3.8s. Checkout conversion dropped 8% in the first week. The fraud model needed 800ms-1.5s for scoring (ML model inference + feature lookup + velocity checks). For legitimate transactions (96%+ of volume), this added latency with no benefit. The ops team was also overwhelmed — every flagged transaction required immediate review because the payment was held inline.
+
+**Decision:** Moved to async scoring with hold-and-review. Transactions process immediately with a basic rule-based pre-screen (velocity limits, known bad actors, amount thresholds — <50ms). Full ML scoring runs asynchronously within 30 seconds. High-risk scores trigger a hold, and ops team has 4-hour SLA to review. Very high-risk (>0.95 score) auto-declines.
+
+**Rationale:** Checkout latency returned to 1.4s (from 3.8s). Conversion recovered. Fraud detection rate actually improved (from 82% to 94.3%) because the async model had more context (could analyze the full session, not just the single transaction). The 4-hour review window is acceptable for the transaction sizes in play ($50-$5,000).
+
+**Consequences:** Small window of exposure (up to 30 seconds before scoring completes, up to 4 hours before manual review). Mitigated by pre-screen rules catching obvious fraud immediately. Required building a review queue UI for the ops team. Net positive: better UX, better detection, better ops workflow.
+
+**Lesson:** Real-time doesn't always mean better. For fraud, having more context (async) beat having less context (inline) — even with a small delay.
