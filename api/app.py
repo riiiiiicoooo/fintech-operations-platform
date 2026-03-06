@@ -14,10 +14,14 @@ All endpoints include proper error handling, idempotency, and audit logging.
 
 from fastapi import FastAPI, HTTPException, Header, Query, Depends
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, date, timedelta
+from decimal import Decimal
 from typing import Optional
 import hashlib
 import uuid
+import jwt
+import os
 from api.models import (
     TransactionRequest, TransactionResponse,
     AccountBalance, BalanceHistoryResponse, BalanceHistory,
@@ -26,6 +30,16 @@ from api.models import (
     AuditLogResponse, AuditTransaction,
     ErrorResponse, HealthCheck,
 )
+
+# ============================================================================
+# PRODUCTION NOTES
+# This is a portfolio demonstration. In a production deployment:
+# - Payment card data would be handled in a PCI DSS-compliant enclave
+# - Encryption keys would be managed via HSM (AWS CloudHSM / Azure Dedicated HSM)
+# - All financial mutations would use Decimal precision (implemented) with SOX-
+#   compliant immutable audit logging and write-ahead journaling
+# - NACHA files would be encrypted at rest and transmitted via SFTP with PGP
+# ============================================================================
 
 # In production, these would be real database connections
 # For this demo, we use in-memory stores
@@ -95,6 +109,57 @@ bootstrap_accounts()
 
 
 # ============================================================================
+# Authentication
+# ============================================================================
+
+security = HTTPBearer()
+JWT_SECRET = os.getenv("JWT_SECRET", "finops-dev-secret-change-in-production")
+JWT_ALGORITHM = "HS256"
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """
+    Validate JWT bearer token and return user claims.
+
+    Returns:
+        dict with user_id and role from the token payload.
+
+    Raises:
+        HTTPException 401 if token is missing, expired, or invalid.
+    """
+    try:
+        payload = jwt.decode(
+            credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM]
+        )
+        return {
+            "user_id": payload.get("sub"),
+            "role": payload.get("role", "viewer"),
+        }
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+
+def require_role(*allowed_roles: str):
+    """Dependency factory that checks the user has one of the allowed roles."""
+
+    async def role_checker(
+        current_user: dict = Depends(get_current_user),
+    ) -> dict:
+        if current_user["role"] not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Role '{current_user['role']}' not authorized. Requires: {', '.join(allowed_roles)}",
+            )
+        return current_user
+
+    return role_checker
+
+
+# ============================================================================
 # Transaction Endpoints
 # ============================================================================
 
@@ -140,11 +205,11 @@ async def create_transaction(
             account_age_days=30,
             kyc_tier="standard",
             lifetime_transaction_count=5,
-            avg_transaction_amount=100.0,
+            avg_transaction_amount=Decimal("100.00"),
             transactions_last_24h=2,
             transactions_last_7d=10,
-            amount_last_24h=150.0,
-            amount_last_7d=600.0,
+            amount_last_24h=Decimal("150.00"),
+            amount_last_7d=Decimal("600.00"),
         )
         fraud_result = fraud_detector.evaluate(fraud_context)
 
@@ -152,8 +217,8 @@ async def create_transaction(
         compliance_check = compliance_checker.check_transaction_limits(
             user_id=request.user_id,
             amount=request.amount,
-            daily_total=150.0,
-            monthly_total=5500.0,
+            daily_total=Decimal("150.00"),
+            monthly_total=Decimal("5500.00"),
         )
 
         if not compliance_check["allowed"]:
@@ -363,10 +428,10 @@ async def get_compliance_screening(transaction_id: str):
         user_id="user_8472",
         kyc_tier="standard",
         kyc_approved=True,
-        daily_limit=2500.0,
-        daily_used=1200.0,
-        monthly_limit=10000.0,
-        monthly_used=5500.0,
+        daily_limit=Decimal("2500.00"),
+        daily_used=Decimal("1200.00"),
+        monthly_limit=Decimal("10000.00"),
+        monthly_used=Decimal("5500.00"),
         ofac_screened=True,
         ofac_match_found=False,
         ofac_match_score=None,
@@ -382,12 +447,15 @@ async def get_compliance_screening(transaction_id: str):
 async def get_audit_log(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    amount_min: Optional[float] = Query(None),
-    amount_max: Optional[float] = Query(None),
+    amount_min: Optional[Decimal] = Query(None),
+    amount_max: Optional[Decimal] = Query(None),
     status: Optional[str] = Query(None),
+    current_user: dict = Depends(require_role("compliance", "admin")),
 ):
     """
     Get audit log of transactions with optional filters.
+
+    Requires authentication with 'compliance' or 'admin' role.
 
     Parameters:
         date_from: Filter transactions on or after date

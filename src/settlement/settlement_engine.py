@@ -13,6 +13,7 @@ Not production code. See docs/ARCHITECTURE.md Section 2 (Settlement Service).
 
 from dataclasses import dataclass, field
 from datetime import datetime, date
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -41,8 +42,8 @@ class SettledTransaction:
     transaction_id: str
     user_id: str
     employer_id: str
-    gross_amount: float
-    platform_fee_rate: float = 0.0125   # 1.25% default
+    gross_amount: Decimal
+    platform_fee_rate: Decimal = Decimal("0.0125")   # 1.25% default
     psp_name: str = "stripe"
     payout_method: PayoutMethod = PayoutMethod.ACH
     settled_at: datetime = field(default_factory=datetime.utcnow)
@@ -53,19 +54,18 @@ class SettledTransaction:
 class SplitCalculation:
     """Breakdown of how a single transaction's funds are distributed."""
     transaction_id: str
-    gross_amount: float
-    platform_fee: float
-    psp_fee: float
-    user_receives: float
-    holdback_amount: float = 0.0
+    gross_amount: Decimal
+    platform_fee: Decimal
+    psp_fee: Decimal
+    user_receives: Decimal
+    holdback_amount: Decimal = Decimal("0.00")
 
     @property
-    def total_allocated(self) -> float:
+    def total_allocated(self) -> Decimal:
         return self.platform_fee + self.psp_fee + self.user_receives + self.holdback_amount
 
     def validate(self):
-        delta = abs(self.gross_amount - self.total_allocated)
-        if delta > 0.01:
+        if self.gross_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != self.total_allocated.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP):
             raise ValueError(
                 f"Split does not sum to gross. "
                 f"Gross: ${self.gross_amount:.2f}, Allocated: ${self.total_allocated:.2f}"
@@ -77,10 +77,10 @@ class NetPosition:
     """Aggregated net position for a single user across multiple transactions."""
     user_id: str
     transaction_count: int
-    gross_total: float
-    fees_total: float
-    holdback_total: float
-    net_payout: float
+    gross_total: Decimal
+    fees_total: Decimal
+    holdback_total: Decimal
+    net_payout: Decimal
 
 
 @dataclass
@@ -100,41 +100,41 @@ class SettlementBatch:
         return len(self.transactions)
 
     @property
-    def gross_amount(self) -> float:
-        return sum(t.gross_amount for t in self.transactions)
+    def gross_amount(self) -> Decimal:
+        return sum((t.gross_amount for t in self.transactions), Decimal("0.00"))
 
     @property
-    def total_platform_fees(self) -> float:
-        return sum(s.platform_fee for s in self.splits)
+    def total_platform_fees(self) -> Decimal:
+        return sum((s.platform_fee for s in self.splits), Decimal("0.00"))
 
     @property
-    def total_psp_fees(self) -> float:
-        return sum(s.psp_fee for s in self.splits)
+    def total_psp_fees(self) -> Decimal:
+        return sum((s.psp_fee for s in self.splits), Decimal("0.00"))
 
     @property
-    def total_holdback(self) -> float:
-        return sum(s.holdback_amount for s in self.splits)
+    def total_holdback(self) -> Decimal:
+        return sum((s.holdback_amount for s in self.splits), Decimal("0.00"))
 
     @property
-    def total_net_payout(self) -> float:
-        return sum(n.net_payout for n in self.net_positions)
+    def total_net_payout(self) -> Decimal:
+        return sum((n.net_payout for n in self.net_positions), Decimal("0.00"))
 
 
 # --- PSP Fee Schedule ---
 
 PSP_FEE_SCHEDULE = {
     # (psp_name, payout_method): (percentage, flat_fee)
-    ("stripe", PayoutMethod.ACH): (0.008, 0.00),       # 0.8%
-    ("stripe", PayoutMethod.CARD): (0.029, 0.30),       # 2.9% + $0.30
-    ("stripe", PayoutMethod.INSTANT): (0.025, 0.25),    # 2.5% + $0.25
-    ("adyen", PayoutMethod.ACH): (0.006, 0.00),         # 0.6%
-    ("adyen", PayoutMethod.CARD): (0.025, 0.25),        # 2.5% + $0.25
-    ("adyen", PayoutMethod.WIRE): (0.000, 5.00),        # Flat $5
-    ("tabapay", PayoutMethod.INSTANT): (0.015, 0.00),   # 1.5%
+    ("stripe", PayoutMethod.ACH): (Decimal("0.008"), Decimal("0.00")),       # 0.8%
+    ("stripe", PayoutMethod.CARD): (Decimal("0.029"), Decimal("0.30")),       # 2.9% + $0.30
+    ("stripe", PayoutMethod.INSTANT): (Decimal("0.025"), Decimal("0.25")),    # 2.5% + $0.25
+    ("adyen", PayoutMethod.ACH): (Decimal("0.006"), Decimal("0.00")),         # 0.6%
+    ("adyen", PayoutMethod.CARD): (Decimal("0.025"), Decimal("0.25")),        # 2.5% + $0.25
+    ("adyen", PayoutMethod.WIRE): (Decimal("0.000"), Decimal("5.00")),        # Flat $5
+    ("tabapay", PayoutMethod.INSTANT): (Decimal("0.015"), Decimal("0.00")),   # 1.5%
 }
 
 # Holdback rate for high-risk transactions (released after 30 days)
-HOLDBACK_RATE = 0.05  # 5%
+HOLDBACK_RATE = Decimal("0.05")  # 5%
 
 
 # --- Settlement Engine ---
@@ -185,7 +185,7 @@ class SettlementEngine:
     def _calculate_split(self, transaction: SettledTransaction) -> SplitCalculation:
         """
         Calculate the multi-party split for a single transaction.
-        
+
         From $500 employer funding:
           Platform fee (1.25%): $6.25
           PSP fee (varies):     $4.00
@@ -193,20 +193,21 @@ class SettlementEngine:
           User receives:        remainder
         """
         gross = transaction.gross_amount
+        cents = Decimal("0.01")
 
         # Platform fee
-        platform_fee = round(gross * transaction.platform_fee_rate, 2)
+        platform_fee = (gross * transaction.platform_fee_rate).quantize(cents, rounding=ROUND_HALF_UP)
 
         # PSP fee from schedule
         fee_key = (transaction.psp_name, transaction.payout_method)
-        psp_pct, psp_flat = PSP_FEE_SCHEDULE.get(fee_key, (0.029, 0.30))
-        psp_fee = round(gross * psp_pct + psp_flat, 2)
+        psp_pct, psp_flat = PSP_FEE_SCHEDULE.get(fee_key, (Decimal("0.029"), Decimal("0.30")))
+        psp_fee = (gross * psp_pct + psp_flat).quantize(cents, rounding=ROUND_HALF_UP)
 
         # Holdback for high-risk
-        holdback = round(gross * HOLDBACK_RATE, 2) if transaction.is_high_risk else 0.0
+        holdback = (gross * HOLDBACK_RATE).quantize(cents, rounding=ROUND_HALF_UP) if transaction.is_high_risk else Decimal("0.00")
 
         # User receives the remainder
-        user_receives = round(gross - platform_fee - psp_fee - holdback, 2)
+        user_receives = (gross - platform_fee - psp_fee - holdback).quantize(cents, rounding=ROUND_HALF_UP)
 
         return SplitCalculation(
             transaction_id=transaction.transaction_id,
@@ -234,6 +235,7 @@ class SettlementEngine:
 
         # Aggregate by user
         user_totals: dict[str, dict] = {}
+        cents = Decimal("0.01")
 
         for split in splits:
             txn = txn_map[split.transaction_id]
@@ -242,10 +244,10 @@ class SettlementEngine:
             if user_id not in user_totals:
                 user_totals[user_id] = {
                     "count": 0,
-                    "gross": 0.0,
-                    "fees": 0.0,
-                    "holdback": 0.0,
-                    "net": 0.0,
+                    "gross": Decimal("0.00"),
+                    "fees": Decimal("0.00"),
+                    "holdback": Decimal("0.00"),
+                    "net": Decimal("0.00"),
                 }
 
             user_totals[user_id]["count"] += 1
@@ -258,10 +260,10 @@ class SettlementEngine:
             NetPosition(
                 user_id=user_id,
                 transaction_count=totals["count"],
-                gross_total=round(totals["gross"], 2),
-                fees_total=round(totals["fees"], 2),
-                holdback_total=round(totals["holdback"], 2),
-                net_payout=round(totals["net"], 2),
+                gross_total=totals["gross"].quantize(cents, rounding=ROUND_HALF_UP),
+                fees_total=totals["fees"].quantize(cents, rounding=ROUND_HALF_UP),
+                holdback_total=totals["holdback"].quantize(cents, rounding=ROUND_HALF_UP),
+                net_payout=totals["net"].quantize(cents, rounding=ROUND_HALF_UP),
             )
             for user_id, totals in user_totals.items()
         ]
@@ -299,7 +301,7 @@ class SettlementEngine:
             "batch_id": batch.batch_id,
             "settlement_date": batch.settlement_date.isoformat(),
             "entry_count": len(ach_positions),
-            "total_debit": round(sum(np.net_payout for np in ach_positions), 2),
+            "total_debit": sum((np.net_payout for np in ach_positions), Decimal("0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             "individual_entries": [
                 {
                     "user_id": np.user_id,

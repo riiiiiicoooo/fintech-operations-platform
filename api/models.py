@@ -15,7 +15,7 @@ from decimal import Decimal
 class TransactionRequest(BaseModel):
     """POST /transactions request body."""
     user_id: str
-    amount: float = Field(gt=0)
+    amount: Decimal = Field(gt=0, decimal_places=2)
     payment_method: str  # "ach", "card", "instant", "wire"
     destination_account: str
     idempotency_key: str  # Client-provided for deduplication
@@ -24,13 +24,13 @@ class TransactionRequest(BaseModel):
     def amount_positive(cls, v):
         if v <= 0:
             raise ValueError("Amount must be positive")
-        return round(v, 2)
+        return v.quantize(Decimal("0.01"))
 
     class Config:
         schema_extra = {
             "example": {
                 "user_id": "user_8472",
-                "amount": 500.00,
+                "amount": "500.00",
                 "payment_method": "ach",
                 "destination_account": "user_bank_account_123",
                 "idempotency_key": "txn_user8472_20240315_001",
@@ -42,9 +42,9 @@ class TransactionResponse(BaseModel):
     """Transaction response (from POST /transactions)."""
     transaction_id: str
     status: str  # "pending", "processing", "settled", "failed"
-    amount: float
+    amount: Decimal
     user_id: str
-    fraud_score: Optional[float] = None
+    fraud_score: Optional[float] = None       # Score, not monetary
     fraud_decision: Optional[str] = None
     created_at: datetime
 
@@ -53,7 +53,7 @@ class TransactionResponse(BaseModel):
             "example": {
                 "transaction_id": "txn_abc123",
                 "status": "pending",
-                "amount": 500.00,
+                "amount": "500.00",
                 "user_id": "user_8472",
                 "fraud_score": 12,
                 "fraud_decision": "approve",
@@ -70,22 +70,22 @@ class AccountBalance(BaseModel):
     """GET /accounts/{id}/balance response."""
     account_id: str
     user_id: Optional[str] = None
-    posted_balance: float
-    available_balance: float
+    posted_balance: Decimal
+    available_balance: Decimal
     currency: str = "USD"
     as_of: datetime
-    holds_total: float = 0.0
+    holds_total: Decimal = Decimal("0.00")
 
     class Config:
         schema_extra = {
             "example": {
                 "account_id": "user_wallet:user_8472",
                 "user_id": "user_8472",
-                "posted_balance": 1475.00,
-                "available_balance": 975.00,
+                "posted_balance": "1475.00",
+                "available_balance": "975.00",
                 "currency": "USD",
                 "as_of": "2024-03-15T14:30:00Z",
-                "holds_total": 500.00,
+                "holds_total": "500.00",
             }
         }
 
@@ -93,15 +93,15 @@ class AccountBalance(BaseModel):
 class BalanceHistory(BaseModel):
     """Historical balance entry."""
     timestamp: datetime
-    posted_balance: float
-    available_balance: float
+    posted_balance: Decimal
+    available_balance: Decimal
     transaction_id: Optional[str] = None
 
 
 class BalanceHistoryResponse(BaseModel):
     """GET /accounts/{id}/balance?history=true response."""
     account_id: str
-    current_balance: float
+    current_balance: Decimal
     history: List[BalanceHistory]
 
 
@@ -125,7 +125,7 @@ class ReconciliationMatch(BaseModel):
     """Match result in reconciliation report."""
     match_id: str
     status: str  # "exact_match", "fuzzy_match", "many_to_one", "auto_resolved", "exception"
-    delta_amount: float = 0.0
+    delta_amount: Decimal = Decimal("0.00")
     resolution_notes: Optional[str] = None
 
 
@@ -133,7 +133,7 @@ class ReconciliationException(BaseModel):
     """Exception requiring manual review."""
     exception_id: str
     priority: str  # "critical", "high", "medium", "low"
-    delta_amount: float
+    delta_amount: Decimal
     description: str
     assigned_to: Optional[str] = None
 
@@ -180,13 +180,13 @@ class ComplianceScreeningResult(BaseModel):
     user_id: str
     kyc_tier: str  # "basic", "standard", "enhanced"
     kyc_approved: bool
-    daily_limit: float
-    daily_used: float
-    monthly_limit: float
-    monthly_used: float
+    daily_limit: Decimal
+    daily_used: Decimal
+    monthly_limit: Decimal
+    monthly_used: Decimal
     ofac_screened: bool
     ofac_match_found: bool
-    ofac_match_score: Optional[float] = None
+    ofac_match_score: Optional[float] = None    # Score, not monetary
     transaction_allowed: bool
 
     class Config:
@@ -196,10 +196,10 @@ class ComplianceScreeningResult(BaseModel):
                 "user_id": "user_8472",
                 "kyc_tier": "standard",
                 "kyc_approved": True,
-                "daily_limit": 2500.0,
-                "daily_used": 1200.0,
-                "monthly_limit": 10000.0,
-                "monthly_used": 5500.0,
+                "daily_limit": "2500.00",
+                "daily_used": "1200.00",
+                "monthly_limit": "10000.00",
+                "monthly_used": "5500.00",
                 "ofac_screened": True,
                 "ofac_match_found": False,
                 "ofac_match_score": None,
@@ -216,7 +216,7 @@ class AuditTransaction(BaseModel):
     """Transaction entry in audit log."""
     transaction_id: str
     user_id: str
-    amount: float
+    amount: Decimal
     status: str  # "pending", "processing", "settled", "failed"
     fraud_decision: Optional[str] = None
     posted_at: datetime
@@ -241,11 +241,11 @@ class SettlementBatch(BaseModel):
     status: str  # "created", "submitted", "confirmed", "failed"
     settlement_date: date
     transaction_count: int
-    gross_amount: float
-    platform_fees: float
-    psp_fees: float
-    holdback: float
-    net_payout: float
+    gross_amount: Decimal
+    platform_fees: Decimal
+    psp_fees: Decimal
+    holdback: Decimal
+    net_payout: Decimal
     unique_users: int
     created_at: datetime
     submitted_at: Optional[datetime] = None
@@ -282,8 +282,8 @@ class ErrorResponse(BaseModel):
                 "error_code": "INSUFFICIENT_BALANCE",
                 "message": "Available balance insufficient for transaction",
                 "details": {
-                    "requested": 500.0,
-                    "available": 300.0,
+                    "requested": "500.00",
+                    "available": "300.00",
                 },
                 "timestamp": "2024-03-15T14:30:00Z",
             }

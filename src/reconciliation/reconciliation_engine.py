@@ -13,6 +13,7 @@ Not production code. See docs/LEDGER_DESIGN.md Section 6 (Reconciliation Theory)
 
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -50,7 +51,7 @@ class LedgerRecord:
     """Our internal ledger entry."""
     entry_id: str
     transaction_id: str
-    amount: float
+    amount: Decimal
     account_code: str
     posted_at: datetime
     psp_name: str
@@ -60,9 +61,9 @@ class LedgerRecord:
 class PSPRecord:
     """From PSP settlement report (Stripe, Adyen, etc.)."""
     psp_transaction_id: str
-    amount: float
-    fee: float
-    net_amount: float        # amount - fee
+    amount: Decimal
+    fee: Decimal
+    net_amount: Decimal        # amount - fee
     settlement_date: date
     psp_name: str
     internal_reference: Optional[str] = None  # Our transaction_id if available
@@ -72,7 +73,7 @@ class PSPRecord:
 class BankRecord:
     """From bank BAI2 statement."""
     bank_reference: str
-    amount: float
+    amount: Decimal
     posting_date: date
     description: str
     counterparty: Optional[str] = None  # PSP name if identifiable
@@ -87,7 +88,7 @@ class ReconciliationMatch:
     psp_record: Optional[PSPRecord] = None
     bank_record: Optional[BankRecord] = None
     break_type: Optional[BreakType] = None
-    delta_amount: float = 0.0
+    delta_amount: Decimal = Decimal("0.00")
     resolution_notes: str = ""
     matched_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -99,7 +100,7 @@ class ReconciliationException:
     match_id: str
     break_type: BreakType
     priority: ExceptionPriority
-    delta_amount: float
+    delta_amount: Decimal
     description: str
     ledger_record: Optional[LedgerRecord] = None
     psp_record: Optional[PSPRecord] = None
@@ -139,28 +140,28 @@ class ReconciliationRun:
 
 # --- Auto-Resolution Patterns ---
 
-AUTO_RESOLVE_MAX_DELTA = 5.00  # Never auto-resolve deltas over $5.00
+AUTO_RESOLVE_MAX_DELTA = Decimal("5.00")  # Never auto-resolve deltas over $5.00
 
 AUTO_RESOLUTION_PATTERNS = {
     BreakType.TIMING: {
         "description": "PSP settled but bank has not posted yet. Expected to clear within 1-2 business days.",
-        "max_delta": 0.00,  # Timing breaks are exact amount, just delayed
+        "max_delta": Decimal("0.00"),  # Timing breaks are exact amount, just delayed
     },
     BreakType.FEE_DEDUCTION: {
         "description": "PSP deducted processing fee from settlement amount.",
-        "max_delta": 5.00,
+        "max_delta": Decimal("5.00"),
     },
     BreakType.FX_ROUNDING: {
         "description": "Sub-penny rounding difference from currency conversion.",
-        "max_delta": 0.05,
+        "max_delta": Decimal("0.05"),
     },
     BreakType.BATCH_NETTING: {
         "description": "Multiple transactions netted to single bank deposit.",
-        "max_delta": 0.01,  # Netting should be exact
+        "max_delta": Decimal("0.01"),  # Netting should be exact
     },
     BreakType.DUPLICATE_WEBHOOK: {
         "description": "PSP sent duplicate settlement event. Deduplicated.",
-        "max_delta": 0.00,
+        "max_delta": Decimal("0.00"),
     },
 }
 
@@ -247,7 +248,7 @@ class ReconciliationEngine:
                         status=MatchStatus.FUZZY_MATCH,
                         ledger_record=ledger,
                         psp_record=psp,
-                        delta_amount=round(delta, 2),
+                        delta_amount=delta.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
                     )
 
                     run.matches.append(match)
@@ -308,7 +309,7 @@ class ReconciliationEngine:
         """Phase 1: Match by PSP transaction ID, amount, and PSP name."""
         return (
             ledger.psp_name == psp.psp_name and
-            abs(ledger.amount - psp.amount) < 0.01
+            ledger.amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == psp.amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         )
 
     def _fuzzy_match(self, ledger: LedgerRecord, psp: PSPRecord) -> bool:
@@ -320,6 +321,7 @@ class ReconciliationEngine:
 
         return amount_close and date_close and ledger.psp_name == psp.psp_name
 
+
     def _find_bank_match(
         self, psp: PSPRecord, bank_records: list[BankRecord], matched: set
     ) -> Optional[BankRecord]:
@@ -327,7 +329,7 @@ class ReconciliationEngine:
         for bank in bank_records:
             if bank.bank_reference in matched:
                 continue
-            if (abs(bank.amount - psp.net_amount) < 0.01 and
+            if (bank.amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == psp.net_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) and
                 abs((bank.posting_date - psp.settlement_date).days) <= 1):
                 return bank
         return None
@@ -348,8 +350,8 @@ class ReconciliationEngine:
             return None
 
         # Check if sum of candidates matches bank amount
-        candidate_sum = sum(p.net_amount for p in candidates)
-        if abs(candidate_sum - bank.amount) < 0.01:
+        candidate_sum = sum((p.net_amount for p in candidates), Decimal("0.00"))
+        if candidate_sum.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == bank.amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP):
             return candidates
 
         return None
@@ -361,19 +363,19 @@ class ReconciliationEngine:
         if match.psp_record and not match.bank_record:
             return BreakType.TIMING
 
-        if match.psp_record and delta <= 5.00:
+        if match.psp_record and delta <= Decimal("5.00"):
             # PSP fee deduction: ledger shows gross, PSP shows net
             if match.ledger_record and match.psp_record:
                 expected_fee = match.ledger_record.amount - match.psp_record.net_amount
-                if abs(delta - match.psp_record.fee) < 0.01:
+                if abs(delta - match.psp_record.fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == Decimal("0.00"):
                     return BreakType.FEE_DEDUCTION
 
-        if delta < 0.05:
+        if delta < Decimal("0.05"):
             return BreakType.FX_ROUNDING
 
         return BreakType.UNKNOWN
 
-    def _can_auto_resolve(self, break_type: BreakType, delta: float) -> bool:
+    def _can_auto_resolve(self, break_type: BreakType, delta: Decimal) -> bool:
         """Check if a break can be auto-resolved based on pattern and dollar threshold."""
         if break_type == BreakType.UNKNOWN:
             return False
@@ -391,9 +393,9 @@ class ReconciliationEngine:
         """Create an exception for Diana's review queue."""
         delta = match.delta_amount
 
-        if delta > 100:
+        if delta > Decimal("100.00"):
             priority = ExceptionPriority.CRITICAL
-        elif delta > 5:
+        elif delta > Decimal("5.00"):
             priority = ExceptionPriority.HIGH
         else:
             priority = ExceptionPriority.MEDIUM

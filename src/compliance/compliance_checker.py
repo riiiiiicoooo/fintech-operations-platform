@@ -13,6 +13,7 @@ Not production code. See docs/COMPLIANCE_FRAMEWORK.md for full regulatory contex
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -38,24 +39,24 @@ class KYCStatus(Enum):
 @dataclass
 class KYCTierConfig:
     tier: KYCTier
-    max_per_transaction: float
-    max_per_day: float
-    max_per_month: float
+    max_per_transaction: Decimal
+    max_per_day: Decimal
+    max_per_month: Decimal
     verification_method: str
     expected_duration: str
 
 
 KYC_TIER_CONFIGS = {
     KYCTier.BASIC: KYCTierConfig(
-        KYCTier.BASIC, 250.0, 500.0, 2000.0,
+        KYCTier.BASIC, Decimal("250.00"), Decimal("500.00"), Decimal("2000.00"),
         "email + phone + employer match", "< 30 seconds"
     ),
     KYCTier.STANDARD: KYCTierConfig(
-        KYCTier.STANDARD, 1000.0, 2500.0, 10000.0,
+        KYCTier.STANDARD, Decimal("1000.00"), Decimal("2500.00"), Decimal("10000.00"),
         "government ID + database check (Alloy)", "< 3 minutes"
     ),
     KYCTier.ENHANCED: KYCTierConfig(
-        KYCTier.ENHANCED, 5000.0, 10000.0, 25000.0,
+        KYCTier.ENHANCED, Decimal("5000.00"), Decimal("10000.00"), Decimal("25000.00"),
         "document proof + manual review", "< 24 hours"
     ),
 }
@@ -106,11 +107,11 @@ class MonitoringAlert:
 class TransactionHistory:
     """Pre-aggregated user transaction history for monitoring rules."""
     user_id: str
-    amount: float               # Current transaction
-    outbound_30d: float = 0.0   # Total outbound last 30 days
-    inbound_30d: float = 0.0    # Total inbound last 30 days
+    amount: Decimal               # Current transaction
+    outbound_30d: Decimal = Decimal("0.00")   # Total outbound last 30 days
+    inbound_30d: Decimal = Decimal("0.00")    # Total inbound last 30 days
     transactions_7d: list[dict] = field(default_factory=list)  # Recent transactions
-    avg_monthly_volume: float = 0.0
+    avg_monthly_volume: Decimal = Decimal("0.00")
     ip_address: str = ""
     registered_state: str = ""
     ip_country: str = "US"
@@ -189,9 +190,9 @@ class ComplianceChecker:
     def check_transaction_limits(
         self,
         user_id: str,
-        amount: float,
-        daily_total: float = 0.0,
-        monthly_total: float = 0.0,
+        amount: Decimal,
+        daily_total: Decimal = Decimal("0.00"),
+        monthly_total: Decimal = Decimal("0.00"),
     ) -> dict:
         """
         Pre-transaction check. Verifies user's KYC tier allows this transaction.
@@ -299,13 +300,13 @@ class ComplianceChecker:
         triggered = []
 
         # Rule 1: Aggregation (BSA $10K threshold)
-        if history.outbound_30d > 5000:
+        if history.outbound_30d > Decimal("5000.00"):
             triggered.append(self._create_alert(
                 history.user_id,
                 "aggregation_threshold",
                 AlertPriority.HIGH,
                 f"Outbound volume ${history.outbound_30d:.2f} in 30 days exceeds $5,000 monitoring threshold",
-                {"outbound_30d": history.outbound_30d, "threshold": 5000},
+                {"outbound_30d": history.outbound_30d, "threshold": Decimal("5000.00")},
             ))
 
         # Rule 2: Structuring detection
@@ -320,9 +321,9 @@ class ComplianceChecker:
             ))
 
         # Rule 3: Rapid movement (funds in and out within 24 hours)
-        if history.inbound_30d > 0:
-            outbound_ratio = history.outbound_30d / history.inbound_30d
-            if outbound_ratio > 0.8 and history.inbound_30d > 1000:
+        if history.inbound_30d > Decimal("0.00"):
+            outbound_ratio = float(history.outbound_30d / history.inbound_30d)
+            if outbound_ratio > 0.8 and history.inbound_30d > Decimal("1000.00"):
                 triggered.append(self._create_alert(
                     history.user_id,
                     "rapid_movement",
@@ -332,8 +333,8 @@ class ComplianceChecker:
                 ))
 
         # Rule 4: Behavioral anomaly (volume 3x above 90-day average)
-        if history.avg_monthly_volume > 0:
-            current_ratio = (history.outbound_30d + history.inbound_30d) / history.avg_monthly_volume
+        if history.avg_monthly_volume > Decimal("0.00"):
+            current_ratio = float((history.outbound_30d + history.inbound_30d) / history.avg_monthly_volume)
             if current_ratio > 3.0:
                 triggered.append(self._create_alert(
                     history.user_id,
@@ -361,17 +362,18 @@ class ComplianceChecker:
         Detect potential structuring: multiple transactions just below
         a reporting threshold ($3,000 in our case, conservative below BSA's $10K).
         """
-        suspect_range = (2000, 2999)
+        suspect_min = Decimal("2000.00")
+        suspect_max = Decimal("2999.00")
         suspect_txns = [
             t for t in history.transactions_7d
-            if suspect_range[0] <= t.get("amount", 0) <= suspect_range[1]
+            if suspect_min <= Decimal(str(t.get("amount", 0))) <= suspect_max
         ]
 
         if len(suspect_txns) >= 3:
             return {
                 "count": len(suspect_txns),
-                "total": sum(t.get("amount", 0) for t in suspect_txns),
-                "range": f"${suspect_range[0]}-${suspect_range[1]}",
+                "total": sum((Decimal(str(t.get("amount", 0))) for t in suspect_txns), Decimal("0.00")),
+                "range": f"${suspect_min:.0f}-${suspect_max:.0f}",
                 "window": "7 days",
             }
 

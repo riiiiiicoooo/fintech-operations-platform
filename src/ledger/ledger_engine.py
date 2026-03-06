@@ -13,6 +13,7 @@ Not production code. See docs/LEDGER_DESIGN.md for full accounting model.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -107,8 +108,8 @@ class EntryType(Enum):
 @dataclass
 class JournalEntryLine:
     account: Account
-    debit: float = 0.0
-    credit: float = 0.0
+    debit: Decimal = Decimal("0.00")
+    credit: Decimal = Decimal("0.00")
 
     def __post_init__(self):
         if self.debit < 0 or self.credit < 0:
@@ -138,7 +139,7 @@ class JournalEntry:
         total_debits = sum(line.debit for line in self.lines)
         total_credits = sum(line.credit for line in self.lines)
 
-        if abs(total_debits - total_credits) > 0.001:
+        if total_debits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != total_credits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP):
             raise ValueError(
                 f"Journal entry is not balanced. "
                 f"Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f}, "
@@ -146,8 +147,8 @@ class JournalEntry:
             )
 
     @property
-    def total_amount(self) -> float:
-        return sum(line.debit for line in self.lines)
+    def total_amount(self) -> Decimal:
+        return sum((line.debit for line in self.lines), Decimal("0.00"))
 
 
 # --- Hold Model ---
@@ -163,7 +164,7 @@ class HoldStatus(Enum):
 class Hold:
     hold_id: str
     account: Account
-    amount: float
+    amount: Decimal
     status: HoldStatus = HoldStatus.ACTIVE
     transaction_id: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -227,17 +228,17 @@ class LedgerEngine:
 
     # --- Balance Calculation ---
 
-    def get_posted_balance(self, account: Account) -> float:
+    def get_posted_balance(self, account: Account) -> Decimal:
         """
         Calculate balance from journal entry lines. This is the canonical balance.
-        
+
         For ASSET and EXPENSE accounts (debit-normal):
             balance = SUM(debits) - SUM(credits)
         For LIABILITY and REVENUE accounts (credit-normal):
             balance = SUM(credits) - SUM(debits)
         """
-        total_debits = 0.0
-        total_credits = 0.0
+        total_debits = Decimal("0.00")
+        total_credits = Decimal("0.00")
 
         for entry in self.journal_entries:
             for line in entry.lines:
@@ -250,22 +251,23 @@ class LedgerEngine:
         else:
             return total_credits - total_debits
 
-    def get_available_balance(self, account: Account) -> float:
+    def get_available_balance(self, account: Account) -> Decimal:
         """
         Available balance = posted balance - active holds.
         This is what the user can actually spend.
         """
         posted = self.get_posted_balance(account)
         active_holds = sum(
-            h.amount for h in self.holds
-            if h.account.full_code == account.full_code
-            and h.status == HoldStatus.ACTIVE
+            (h.amount for h in self.holds
+             if h.account.full_code == account.full_code
+             and h.status == HoldStatus.ACTIVE),
+            Decimal("0.00"),
         )
         return posted - active_holds
 
     # --- Hold Management ---
 
-    def create_hold(self, account: Account, amount: float, transaction_id: str) -> Hold:
+    def create_hold(self, account: Account, amount: Decimal, transaction_id: str) -> Hold:
         available = self.get_available_balance(account)
         if amount > available:
             raise ValueError(
@@ -365,7 +367,7 @@ class LedgerEngine:
     def record_employer_funding(
         self,
         employer_id: str,
-        amount: float,
+        amount: Decimal,
         idempotency_key: str,
     ) -> JournalEntry:
         """Step 1 of employer funding: lump sum received, held in holding account."""
@@ -386,8 +388,8 @@ class LedgerEngine:
         self,
         employer_id: str,
         user_id: str,
-        gross_amount: float,
-        platform_fee: float,
+        gross_amount: Decimal,
+        platform_fee: Decimal,
         idempotency_key: str,
     ) -> JournalEntry:
         """Step 2 of employer funding: allocate from holding to individual wallet."""
@@ -411,7 +413,7 @@ class LedgerEngine:
     def record_user_transfer(
         self,
         user_id: str,
-        amount: float,
+        amount: Decimal,
         psp_name: str,
         idempotency_key: str,
     ) -> tuple[JournalEntry, Hold]:
@@ -449,7 +451,7 @@ class LedgerEngine:
         self,
         original_entry_id: str,
         user_id: str,
-        amount: float,
+        amount: Decimal,
         psp_name: str,
         idempotency_key: str,
     ) -> JournalEntry:
@@ -474,7 +476,7 @@ class LedgerEngine:
 
     def record_chargeback(
         self,
-        amount: float,
+        amount: Decimal,
         psp_name: str,
         idempotency_key: str,
     ) -> JournalEntry:
@@ -500,7 +502,7 @@ class LedgerEngine:
     def get_account_history(self, account: Account) -> list[dict]:
         """Returns all journal entry lines for a specific account, chronologically."""
         history = []
-        running_balance = 0.0
+        running_balance = Decimal("0.00")
 
         for entry in self.journal_entries:
             for line in entry.lines:
@@ -516,7 +518,7 @@ class LedgerEngine:
                         "description": entry.description,
                         "debit": line.debit,
                         "credit": line.credit,
-                        "running_balance": round(running_balance, 2),
+                        "running_balance": running_balance.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
                         "posted_at": entry.posted_at.isoformat(),
                     })
 
@@ -527,20 +529,21 @@ class LedgerEngine:
         Verify that total system debits equal total system credits.
         This should always be true. If it's not, there's a bug.
         """
-        total_debits = 0.0
-        total_credits = 0.0
+        total_debits = Decimal("0.00")
+        total_credits = Decimal("0.00")
 
         for entry in self.journal_entries:
             for line in entry.lines:
                 total_debits += line.debit
                 total_credits += line.credit
 
-        balanced = abs(total_debits - total_credits) < 0.001
+        delta = abs(total_debits - total_credits)
+        balanced = total_debits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == total_credits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         return {
-            "total_debits": round(total_debits, 2),
-            "total_credits": round(total_credits, 2),
-            "delta": round(abs(total_debits - total_credits), 2),
+            "total_debits": total_debits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "total_credits": total_credits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "delta": delta.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             "balanced": balanced,
             "entry_count": len(self.journal_entries),
         }

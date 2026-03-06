@@ -13,6 +13,7 @@ Not production code. See docs/ARCHITECTURE.md Section 2 (Payment Service).
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional, Protocol
 from collections import deque
@@ -41,8 +42,8 @@ class PSPResponse:
     psp_name: str
     psp_transaction_id: str
     status: PSPStatus
-    amount: float
-    fee: float = 0.0
+    amount: Decimal
+    fee: Decimal = Decimal("0.00")
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     latency_ms: float = 0.0
@@ -57,12 +58,12 @@ class PSPAdapter(Protocol):
     supported_methods: list[PaymentMethod]
 
     def create_payment(
-        self, amount: float, method: PaymentMethod, idempotency_key: str
+        self, amount: Decimal, method: PaymentMethod, idempotency_key: str
     ) -> PSPResponse: ...
 
     def capture_payment(self, psp_transaction_id: str) -> PSPResponse: ...
     def void_payment(self, psp_transaction_id: str) -> PSPResponse: ...
-    def refund_payment(self, psp_transaction_id: str, amount: float) -> PSPResponse: ...
+    def refund_payment(self, psp_transaction_id: str, amount: Decimal) -> PSPResponse: ...
     def get_status(self, psp_transaction_id: str) -> PSPResponse: ...
 
 
@@ -74,7 +75,10 @@ class StripeAdapter:
 
     def create_payment(self, amount, method, idempotency_key):
         # Simulates Stripe API call
-        fee = round(amount * 0.029 + 0.30, 2) if method == PaymentMethod.CARD else round(amount * 0.008, 2)
+        if method == PaymentMethod.CARD:
+            fee = (amount * Decimal("0.029") + Decimal("0.30")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            fee = (amount * Decimal("0.008")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return PSPResponse(
             psp_name=self.name,
             psp_transaction_id=f"pi_{idempotency_key[:12]}",
@@ -85,11 +89,11 @@ class StripeAdapter:
 
     def capture_payment(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
     def void_payment(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
     def refund_payment(self, psp_transaction_id, amount):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
@@ -97,7 +101,7 @@ class StripeAdapter:
 
     def get_status(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
 
 class AdyenAdapter:
@@ -105,7 +109,10 @@ class AdyenAdapter:
     supported_methods = [PaymentMethod.ACH, PaymentMethod.CARD, PaymentMethod.WIRE]
 
     def create_payment(self, amount, method, idempotency_key):
-        fee = round(amount * 0.025 + 0.25, 2) if method == PaymentMethod.CARD else round(amount * 0.006, 2)
+        if method == PaymentMethod.CARD:
+            fee = (amount * Decimal("0.025") + Decimal("0.25")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            fee = (amount * Decimal("0.006")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return PSPResponse(
             psp_name=self.name,
             psp_transaction_id=f"adyen_{idempotency_key[:12]}",
@@ -116,11 +123,11 @@ class AdyenAdapter:
 
     def capture_payment(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
     def void_payment(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
     def refund_payment(self, psp_transaction_id, amount):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
@@ -128,7 +135,7 @@ class AdyenAdapter:
 
     def get_status(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
 
 class TabapayAdapter:
@@ -137,7 +144,7 @@ class TabapayAdapter:
     supported_methods = [PaymentMethod.INSTANT]
 
     def create_payment(self, amount, method, idempotency_key):
-        fee = round(amount * 0.015, 2)  # 40% cheaper than Stripe for instant
+        fee = (amount * Decimal("0.015")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)  # 40% cheaper than Stripe for instant
         return PSPResponse(
             psp_name=self.name,
             psp_transaction_id=f"tp_{idempotency_key[:12]}",
@@ -148,11 +155,11 @@ class TabapayAdapter:
 
     def capture_payment(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
     def void_payment(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
     def refund_payment(self, psp_transaction_id, amount):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
@@ -160,7 +167,7 @@ class TabapayAdapter:
 
     def get_status(self, psp_transaction_id):
         return PSPResponse(psp_name=self.name, psp_transaction_id=psp_transaction_id,
-                           status=PSPStatus.SUCCESS, amount=0)
+                           status=PSPStatus.SUCCESS, amount=Decimal("0.00"))
 
 
 # --- Circuit Breaker ---
@@ -327,7 +334,7 @@ class PaymentOrchestrator:
 
     def process_payment(
         self,
-        amount: float,
+        amount: Decimal,
         method: PaymentMethod,
         idempotency_key: str,
     ) -> PSPResponse:
@@ -398,7 +405,7 @@ class PaymentOrchestrator:
     def _execute_with_retry(
         self,
         adapter: PSPAdapter,
-        amount: float,
+        amount: Decimal,
         method: PaymentMethod,
         idempotency_key: str,
     ) -> PSPResponse:

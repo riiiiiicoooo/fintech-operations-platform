@@ -13,6 +13,7 @@ Not production code. See docs/ARCHITECTURE.md Section 2 (Fraud Service).
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -31,7 +32,7 @@ class TransactionContext:
     """All signals available at transaction time for fraud evaluation."""
     transaction_id: str
     user_id: str
-    amount: float
+    amount: Decimal
     payment_method: str          # "ach", "card", "instant"
     device_fingerprint: str
     ip_address: str
@@ -42,13 +43,13 @@ class TransactionContext:
     account_age_days: int = 0
     kyc_tier: str = "basic"      # "basic", "standard", "enhanced"
     lifetime_transaction_count: int = 0
-    avg_transaction_amount: float = 0.0
+    avg_transaction_amount: Decimal = Decimal("0.00")
 
     # Recent activity (pre-aggregated)
     transactions_last_24h: int = 0
     transactions_last_7d: int = 0
-    amount_last_24h: float = 0.0
-    amount_last_7d: float = 0.0
+    amount_last_24h: Decimal = Decimal("0.00")
+    amount_last_7d: Decimal = Decimal("0.00")
     failed_transactions_last_24h: int = 0
     unique_ips_last_7d: int = 1
     unique_devices_last_7d: int = 1
@@ -60,7 +61,7 @@ class FraudFeatures:
     amount_to_avg_ratio: float = 0.0       # How unusual is this amount vs. user's average
     velocity_24h: int = 0                  # Transaction count in last 24 hours
     velocity_7d: int = 0                   # Transaction count in last 7 days
-    amount_velocity_24h: float = 0.0       # Total amount in last 24 hours
+    amount_velocity_24h: Decimal = Decimal("0.00")  # Total amount in last 24 hours
     account_age_days: int = 0
     is_new_device: bool = False
     is_new_ip: bool = False
@@ -105,7 +106,7 @@ class HighAmountRule(FraudRule):
     """Transaction amount is 3x+ the user's average."""
     def evaluate(self, context, features):
         if context.avg_transaction_amount == 0:
-            return context.amount > 500  # Default threshold for new users
+            return context.amount > Decimal("500")  # Default threshold for new users
         return features.amount_to_avg_ratio > 3.0
 
 
@@ -118,13 +119,13 @@ class VelocityRule(FraudRule):
 class AmountVelocityRule(FraudRule):
     """Total amount in 24 hours exceeds $2,500."""
     def evaluate(self, context, features):
-        return features.amount_velocity_24h > 2500
+        return features.amount_velocity_24h > Decimal("2500")
 
 
 class NewAccountHighValueRule(FraudRule):
     """Account less than 7 days old with transaction over $500."""
     def evaluate(self, context, features):
-        return features.account_age_days < 7 and context.amount > 500
+        return features.account_age_days < 7 and context.amount > Decimal("500")
 
 
 class NewDeviceRule(FraudRule):
@@ -148,13 +149,13 @@ class NearTierLimitRule(FraudRule):
 class RoundAmountRule(FraudRule):
     """Exact round amounts ($100, $500, $1000) are slightly more suspicious."""
     def evaluate(self, context, features):
-        return features.is_round_amount and context.amount >= 500
+        return features.is_round_amount and context.amount >= Decimal("500")
 
 
 class FirstTransactionHighValueRule(FraudRule):
     """User's very first transaction is over $250."""
     def evaluate(self, context, features):
-        return features.first_transaction and context.amount > 250
+        return features.first_transaction and context.amount > Decimal("250")
 
 
 # --- Fraud Detector ---
@@ -259,12 +260,12 @@ class FraudDetector:
     def _extract_features(self, ctx: TransactionContext) -> FraudFeatures:
         """Extract computed features from raw transaction context."""
         # KYC tier limits
-        tier_limits = {"basic": 250, "standard": 1000, "enhanced": 5000}
-        tier_limit = tier_limits.get(ctx.kyc_tier, 250)
+        tier_limits = {"basic": Decimal("250"), "standard": Decimal("1000"), "enhanced": Decimal("5000")}
+        tier_limit = tier_limits.get(ctx.kyc_tier, Decimal("250"))
 
         return FraudFeatures(
             amount_to_avg_ratio=(
-                ctx.amount / ctx.avg_transaction_amount
+                float(ctx.amount / ctx.avg_transaction_amount)
                 if ctx.avg_transaction_amount > 0 else 0.0
             ),
             velocity_24h=ctx.transactions_last_24h,
@@ -274,7 +275,7 @@ class FraudDetector:
             is_new_device=ctx.unique_devices_last_7d > 1,
             is_new_ip=ctx.unique_ips_last_7d > 1,
             failed_attempt_count=ctx.failed_transactions_last_24h,
-            amount_near_tier_limit=ctx.amount > tier_limit * 0.9,
+            amount_near_tier_limit=ctx.amount > tier_limit * Decimal("0.9"),
             is_round_amount=ctx.amount == int(ctx.amount) and ctx.amount % 100 == 0,
             first_transaction=ctx.lifetime_transaction_count == 0,
         )
