@@ -328,3 +328,255 @@ This document captures key product and technical decisions, what alternatives we
 **Consequences:** Small window of exposure (up to 30 seconds before scoring completes, up to 4 hours before manual review). Mitigated by pre-screen rules catching obvious fraud immediately. Required building a review queue UI for the ops team. Net positive: better UX, better detection, better ops workflow.
 
 **Lesson:** Real-time doesn't always mean better. For fraud, having more context (async) beat having less context (inline) — even with a small delay.
+
+---
+
+## DEC-014: Multi-PSP Pivot - Stripe to Adyen for International Transactions
+
+**Date:** January 2025
+**Status:** Accepted
+**Decider:** PM + Finance Lead + Engineering Lead
+
+**Context:** The platform had built a strong domestic market with Stripe as the sole PSP. In Q4 2024, the largest employer client onboarded a multinational workforce with 35% international transaction volume. Stripe's cross-border payment fees for these transactions were running 3.2% of transaction value (compared to 1.8% domestic), eating significantly into the client's already thin margin (they paid the platform 0.5% + $0.25 per transaction).
+
+**Problem:** At $1.2M monthly volume with 35% international, Stripe's cross-border premium was costing the client $12,600/month in excess fees. The client was considering moving to a competitor with lower international rates.
+
+**Option A: Negotiate with Stripe.** Request a volume discount or carve-out for international transactions. Stripe doesn't negotiate rates; they're the lowest in the market domestically but not internationally.
+
+**Option B: Accept the higher fees.** Absorb the cost or negotiate with the client to pay more. Neither option was sustainable.
+
+**Option C: Multi-PSP routing with geographic logic.** Integrate a second PSP (Adyen) with pricing optimized for international. Build a routing layer that sends international transactions to Adyen and domestic to Stripe. Domestic transactions stay at 1.8%, international to Adyen at 1.9%.
+
+**Decision:** Option C (multi-PSP routing with geographic logic).
+
+**Rationale:**
+- Multi-PSP infrastructure was already planned (DEC-002), so the engineering cost was incremental: add an Adyen adapter and update the router.
+- Adyen's international rates (1.9%) beat Stripe (3.2%), saving the client $15,600/month on $1.2M volume.
+- The PSP adapter abstraction pattern made this tractable: two weeks of engineering vs. two months if we had to redesign from scratch.
+- Client retention risk was real. The client represents 18% of platform revenue.
+
+**Implementation:** Built a routing rule that checks transaction geo:
+```python
+def route_payment(instruction):
+    if instruction.currency in ['USD', 'CAD'] and user_country in ['US', 'CA']:
+        return 'stripe'  # Domestic rate: 1.8%
+    elif instruction.currency in INTERNATIONAL_CURRENCIES:
+        return 'adyen'   # International rate: 1.9%
+    else:
+        return 'stripe'  # Fallback
+```
+
+**Results:** Client international costs dropped to 1.9% from 3.2%. Client expanded international hiring headcount by 60% within two months. Platform revenue increased (more transaction volume at higher velocity). Multi-PSP infrastructure proved its value during Stripe's December degradation (DEC-002 consequence).
+
+**Lesson:** Product decisions hide in finance discussions. The cross-border fee problem wasn't a tech problem; it was a routing problem, and solving it operationally (by adding a PSP) unlocked growth.
+
+---
+
+## DEC-015: AWS RDS PostgreSQL Over Supabase for Production Infrastructure
+
+**Date:** February 2025
+**Status:** Accepted
+**Decider:** PM + CTO + Compliance Officer
+
+**Context:** The platform initially used Supabase (managed PostgreSQL + Auth + Realtime) for simplicity. As the platform scaled to $8M ARR and compliance requirements tightened, three issues emerged:
+
+1. **Compliance:** Supabase is hosted on AWS but abstracted from direct AWS management. Banking partners required evidence of Multi-AZ failover, backup retention policies, and audit logging under our control.
+2. **Isolation levels:** Supabase's PostgreSQL ran READ COMMITTED by default. Changing to SERIALIZABLE per session requires Supabase support; we can't set it at the database role level.
+3. **Cost:** Supabase charges $50/month for Postgres Pro + $200/month for extra storage. AWS RDS for equivalent capacity was $120/month (on-demand) with Multi-AZ adding $120/month backup cost. Total: $240 vs. $250, but RDS gave us direct control.
+
+**Option A: Stay with Supabase.** Accept compliance friction and request support escalations for isolation level changes. Cheaper in ops overhead (no infrastructure management).
+
+**Option B: Migrate to AWS RDS.** Self-manage PostgreSQL on RDS. More operational burden but direct control and better compliance posture.
+
+**Option C: Use AWS Aurora PostgreSQL.** Managed service with better HA and read replicas. Higher cost (~$400/month) but less operational work.
+
+**Decision:** Option B (AWS RDS PostgreSQL with Multi-AZ).
+
+**Rationale:**
+- Compliance requirements (Multi-AZ, backup retention, audit logging) are non-negotiable for banking partnerships. RDS gives us explicit control and documentation.
+- We needed SERIALIZABLE isolation at the database role level (not per-session), which requires direct database access. Supabase would need vendor escalation each time.
+- Cost was comparable ($240 vs. $250/month), so we could justify the operational overhead.
+- We didn't need Aurora's read replicas yet (no complex analytical queries), so the extra cost wasn't justified.
+
+**Implementation:**
+- Created RDS instance: PostgreSQL 15.2, Multi-AZ, 4GB RAM (db.t3.medium)
+- Configured backups: 30-day retention, automated daily backup at 2 AM ET
+- Set database-level parameters: `default_transaction_isolation = 'serializable'` for app role
+- Enabled Enhanced Monitoring: CPU, memory, I/O metrics to Datadog
+- Migrated data: pg_dump from Supabase → psql to RDS (~2GB, 40 minutes)
+
+**Operational Changes:**
+- Gained responsibility for patching (AWS handles minor versions, we test and apply)
+- Monitor storage growth (set up alerts at 80%)
+- Manage IAM database auth (more complex than Supabase API keys, but more secure)
+- Run nightly vacuum jobs (Supabase did this automatically)
+
+**Results:** Passed banking partner audit. Compliance officer's concerns about data residency and failover now have documentation. Isolation level set at database level; engineers don't need to remember it per transaction. Cost flat; ops burden +4 hours/month for routine maintenance.
+
+**Risk accepted:** Self-managed database means outages are now our responsibility. Mitigation: Multi-AZ failover is automatic; backups tested monthly; on-call rotation for database alerts.
+
+---
+
+## DEC-016: Apache Kafka for Event Streaming Over Redis Streams
+
+**Date:** February 2025
+**Status:** Accepted
+**Decider:** PM + Engineering Lead
+
+**Context:** The platform initially used Redis Streams for event-driven communication (transaction.created → settlement service, fraud service, etc.). As the system scaled, Redis Streams showed limitations:
+
+1. **Partition scalability:** Redis Streams had no built-in partitioning. All consumers competed for a single stream, creating a bottleneck.
+2. **Retention:** Redis Streams required explicit trimming or data was lost on eviction. For 7-year compliance retention, we'd need external archival.
+3. **Ordering guarantees:** Multiple partitions make exactly-once delivery harder to reason about in Redis.
+
+**Option A: Stick with Redis Streams.** Continue using them; add manual partitioning by account_id (separate stream per account).
+
+**Option B: Use AWS SQS.** Managed queue service. Simpler operations. But no order guarantees across messages, and SQS charges per request ($0.40 per million requests).
+
+**Option C: Switch to Apache Kafka.** Industry standard for event streaming. Partitioned by design. Higher operational overhead (self-host or use AWS MSK).
+
+**Decision:** Option C (Apache Kafka).
+
+**Rationale:**
+- **Ordering:** Kafka's partitions by account_id guarantee all transactions for a single account are processed in order. This is critical for settlement (can't process settlement batch before all transactions for that account are ingested).
+- **Retention:** Kafka topics can be configured with 7-year retention. We archive old messages to S3 nightly for cost and compliance.
+- **Scalability:** Multiple consumers can scale independently. Fraud detection can lag settlement slightly without blocking transactions.
+- **Cost:** AWS MSK (Managed Kafka) is ~$0.60 per hour + storage. For a 3-node cluster with 7-day retention, monthly cost is ~$450 + $200 storage = $650. Redis Streams on RDS is free (same database). But the operational value (partitioning, retention, ordering guarantees) justified the cost.
+
+**Architecture:**
+```
+Ledger Service emits transaction.created
+  ↓
+Kafka Topic: transactions
+├── Partition 0: account_id % 10 == 0
+├── Partition 1: account_id % 10 == 1
+├── ... (10 partitions for parallelism)
+└── Partition 9: account_id % 10 == 9
+
+Consumer Group 1 (Settlement)
+├── Consumes: partition 0
+├── Consumes: partition 1
+├── ... (can scale to 10 instances, one per partition)
+
+Consumer Group 2 (Fraud)
+├── Reads same topic
+├── Offset independent
+```
+
+**Consequences:** Required learning curve (Kafka ops is more complex than Redis). Added $650/month to infrastructure costs. Ordered processing by account_id enabled settling confidence ("all txns for account A are definitely processed before settlement batch").
+
+---
+
+## DEC-017: Temporal for Settlement Orchestration Over n8n
+
+**Date:** February 2025
+**Status:** Accepted
+**Decider:** PM + Engineering Lead
+
+**Context:** The platform previously used n8n for settlement workflows: collect transactions → calculate splits → generate batch files → submit to PSP → wait for confirmation. n8n was low-code and quick to stand up, but caused operational issues:
+
+1. **Durability:** When an n8n worker crashed mid-workflow, the entire settlement batch had to restart from the beginning. If we were at "waiting for PSP confirmation," we'd re-submit the batch and potentially duplicate payouts.
+2. **Visibility:** No built-in way to query "what's the status of settlement batch 2025-02-28-001?" without digging through database logs.
+3. **Timeout handling:** n8n workflows had a 24-hour timeout limit. We needed to wait up to 48 hours for PSP confirmation without automatic failure.
+
+**Option A: Stick with n8n.** Implement better idempotency checks to prevent duplicate payouts. Still had visibility and timeout issues.
+
+**Option B: Use AWS Step Functions.** Managed orchestration. Better than n8n. But tied to AWS, and limited Python integration.
+
+**Option C: Use Temporal.** Temporal is designed for long-running workflows with durability and human-in-the-loop. Higher learning curve. Open source or hosted (Temporal Cloud).
+
+**Decision:** Option C (Temporal).
+
+**Rationale:**
+- **Durability:** Temporal checkpoints workflow state at each activity boundary. If a worker crashes after "Activity 3: Submit batch to PSP" completes, recovery resumes at "Activity 4: Wait for confirmation" without re-executing the submit.
+- **Visibility:** Query workflow status in real-time: `temporal workflow show --workflow_id settlement_batch_2025_02_28_001` returns current state and next action.
+- **Timeout handling:** Temporal supports custom timeout logic. We set activity timeouts (each PSP call max 4 hours) and workflow timeout (48 hours total), with explicit retry logic.
+- **Cost:** Temporal Cloud is ~$200/month for our scale. n8n was $50/month, but add-on operators (conditional logic, retry) pushed it to $150/month equivalent. Temporal at $200 was worth it for durability.
+
+**Implementation:**
+```python
+@workflow.defn
+class SettlementBatchWorkflow:
+    @workflow.run
+    async def run(self, batch_id: str):
+        # Activity 1: collect
+        txns = await workflow.execute_activity(
+            collect_settled_transactions,
+            batch_id,
+            start_to_close_timeout=timedelta(minutes=5)
+        )
+
+        # Activity 2: calculate splits
+        instructions = await workflow.execute_activity(
+            calculate_settlement_splits,
+            txns,
+            start_to_close_timeout=timedelta(minutes=10)
+        )
+
+        # Activity 3: submit to PSP (with retry)
+        payout_ids = await workflow.execute_activity(
+            submit_to_psp,
+            instructions,
+            start_to_close_timeout=timedelta(hours=4),
+            retry_policy=RetryPolicy(
+                max_attempts=5,
+                initial_interval=timedelta(seconds=60),
+                backoff_coefficient=2.0
+            )
+        )
+
+        # Activity 4: wait for confirmation (long timeout)
+        await workflow.execute_activity(
+            wait_for_psp_confirmation,
+            payout_ids,
+            start_to_close_timeout=timedelta(hours=48)
+        )
+
+        # Activity 5: post ledger entries
+        await workflow.execute_activity(
+            post_settlement_entries,
+            batch_id,
+            start_to_close_timeout=timedelta(minutes=10)
+        )
+```
+
+**Results:** Zero duplicate payout incidents after migration. Settlement batch visibility reduced ops support tickets by 40% (people could self-check status). Longer PSP confirmation timeouts enabled partnerships with slower processors (some international PSPs have 36-hour settlement window).
+
+---
+
+## DEC-018: Datadog for Monitoring Over Grafana + Prometheus
+
+**Date:** February 2025
+**Status:** Accepted
+**Decider:** PM + Engineering Lead + Compliance Officer
+
+**Context:** The platform initially used Grafana (dashboard) + Prometheus (metrics) for monitoring. At scale, this setup had gaps:
+
+1. **Logs:** Prometheus has no log aggregation. We used CloudWatch, but correlated CloudWatch logs with Prometheus metrics required manual switching between consoles.
+2. **APM:** No built-in application tracing. To debug slow transactions, we dug through logs and tried to reconstruct the flow.
+3. **Compliance:** Grafana/Prometheus have no audit logging of who viewed what data. Banking partners asked, "Do you have audit trails showing who accessed financial reports?"
+
+**Option A: Expand Grafana + Prometheus.** Add Loki (log aggregation) and Tempo (tracing). Stitched-together solution. Operational burden: maintain 4 systems.
+
+**Option B: Use Datadog.** All-in-one: metrics, logs, APM, and more. Higher cost. Vendor lock-in risk.
+
+**Option C: Use New Relic or Splunk.** Alternatives to Datadog. Similar feature set.
+
+**Decision:** Option B (Datadog).
+
+**Rationale:**
+- **Unified view:** A single console shows metrics, logs, and traces. When a transaction is slow, click "View related logs" and see what happened at each stage.
+- **APM:** Datadog APM automatically traces FastAPI requests, SQL queries, and inter-service calls. Zero code changes needed (well, just adding the agent).
+- **Compliance:** Datadog logs user access to dashboards and exported data. We satisfied the banking partner audit question immediately.
+- **Cost:** Prometheus/Grafana + CloudWatch + Splunk logs was ~$400/month across tools. Datadog at ~$500/month was slightly more but replaced three systems.
+
+**Implementation:**
+- Install Datadog agent on all servers
+- Point FastAPI metrics to Datadog (via StatsD client or Python library)
+- Redirect PostgreSQL query logs to Datadog
+- Redirect application logs to Datadog (JSON format for structured logging)
+- Set up Datadog dashboard mirroring our old Grafana boards
+
+**Consequences:** Required onboarding team on Datadog UI (initially confusing with all the features). Datadog contract terms are aggressive; easy to overspend on features we don't need. But for a fintech platform, the compliance and audit trail value outweighed the cost and complexity.
+
+**Bonus:** Datadog's financial services dashboard templates included KPIs for reconciliation rates, settlement volumes, and fraud metrics that we had built manually in Grafana. Saved engineering time.

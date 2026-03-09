@@ -29,7 +29,7 @@
 │  └── Dispute flow                ├── Employer admin portal                 │
 │                                  └── Support transaction viewer            │
 │                                                                            │
-│  Auth: Supabase Auth (JWT + MFA for internal users)                        │
+│  Auth: JWT + Cognito/Auth0 (MFA for internal users)                        │
 │  Component library: shadcn/ui (web), React Native Paper (mobile)           │
 └──────────────────────────────────┬─────────────────────────────────────────┘
                                    │ HTTPS / WebSocket
@@ -61,7 +61,7 @@
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                            DATA LAYER                                      │
 │                                                                            │
-│  PostgreSQL 15 (ACID transactions for ledger)                              │
+│  AWS RDS PostgreSQL 15 (Multi-AZ, ACID transactions, SERIALIZABLE)         │
 │  ├── Ledger: accounts, journal_entries, holds                              │
 │  ├── Transactions: state machine, event history                            │
 │  ├── Compliance: kyc_verifications, monitoring_alerts, sar_cases           │
@@ -69,13 +69,14 @@
 │  └── Audit: compliance_events (append-only, 7-year retention)              │
 │                                                                            │
 │  Redis: idempotency key store, fraud rule cache, PSP health scores,        │
-│         rate limiting, Celery task queue                                    │
+│         rate limiting                                                      │
 │                                                                            │
-│  Event Bus (Redis Streams or SQS):                                         │
-│  ├── transaction.created, transaction.settled, transaction.failed           │
-│  ├── fraud.flagged, fraud.cleared                                          │
-│  ├── reconciliation.completed, reconciliation.exception                    │
-│  └── compliance.alert, compliance.sar_triggered                            │
+│  Event Bus (Apache Kafka):                                                 │
+│  ├── transactions: topic with partitions by account_id                     │
+│  ├── settlement: topic for settlement workflow events                      │
+│  ├── fraud: topic for fraud detection and alerts                          │
+│  ├── reconciliation: topic for recon matches and exceptions                │
+│  └── compliance: topic for KYC, AML, and SAR events                       │
 └────────────────────────────────────────────────────────────────────────────┘
                                      │
                                      ▼
@@ -98,7 +99,7 @@
 
 ## 2. Service Architecture
 
-The platform is organized into six core services. Each service owns a specific domain and communicates through the shared PostgreSQL database for synchronous reads and Redis Streams for async events. The ledger service is the central authority. No other service writes directly to ledger tables.
+The platform is organized into eight core services. Each service owns a specific domain and communicates through the shared PostgreSQL database for synchronous reads and Apache Kafka for async events. The ledger service is the central authority. No other service writes directly to ledger tables. Temporal orchestrates long-running workflows like settlement batching.
 
 ### 2.1 Ledger Service
 
@@ -338,9 +339,123 @@ Each PSP has a standardized adapter that translates our internal payment instruc
 └─────────────────────────────────────────────────┘
 ```
 
-### 2.3 Settlement Service
+### 2.3 Event Streaming (Apache Kafka)
 
-Calculates who owes whom, batches transactions for efficiency, and generates settlement instructions for the payment service to execute.
+All services communicate asynchronously through Kafka topics, enabling scalable event processing and service decoupling. Transaction lifecycle events flow through the system without tight coupling between services.
+
+**Topics and partitioning:**
+
+- **transactions**: Partitioned by `account_id` to maintain order for a single account. Consumers: payment service, settlement service, reconciliation service.
+- **settlement**: Settlement workflow events (workflow_started, workflow_completed, payout_executed). Consumed by settlement orchestrator and monitoring.
+- **fraud**: Fraud detection events (rule_triggered, score_calculated, decision_made). Consumed by compliance service and fraud review queue.
+- **reconciliation**: Reconciliation matches and exceptions. Consumed by reconciliation service and audit trail.
+- **compliance**: KYC decisions, AML alerts, SAR events. Consumed by compliance dashboard and audit.
+
+**Guarantees:**
+
+- At-least-once delivery: Consumers must be idempotent (deduplicate via transaction ID).
+- Ordered within partition: Transactions for the same account are processed sequentially.
+- Retention: 30 days for operational topics, 7 years for compliance topics (via archival to S3).
+
+### 2.4 Settlement Orchestration (Temporal)
+
+Long-running settlement workflows with built-in durability, retry logic, and checkpointing. Temporal ensures settlement batches complete reliably even through service crashes, PSP outages, or network failures.
+
+**Temporal Workflow: `SettlementBatchWorkflow`**
+
+```
+Triggered by: Nightly cron (6 PM ET) or on-demand via API
+    │
+    ▼
+┌─────────────────────────────────┐
+│  Activity 1: Collect Settled Txns│
+│                                  │
+│  Query ledger for transactions    │
+│  in SETTLED state since last      │
+│  settlement batch                 │
+│  Returns: list of (txn_id,        │
+│  amount, destination)             │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Activity 2: Calculate Splits    │
+│                                  │
+│  For each transaction, apply     │
+│  fee rules and holdback logic    │
+│  Returns: settlement instructions │
+│  {dest, amount, method}          │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Activity 3: Create NACHA/Files  │
+│                                  │
+│  Generate ACH batch file,        │
+│  bank transfer instructions,     │
+│  PSP payout batch                │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Activity 4: Submit to PSP       │
+│  (with retries and heartbeat)    │
+│                                  │
+│  Call payment service to         │
+│  execute all settlement          │
+│  instructions                    │
+│                                  │
+│  Retry: exponential backoff,     │
+│  max 5 attempts over 24 hours    │
+│  Timeout: 4 hours per attempt    │
+│                                  │
+│  Heartbeat: every 60s to detect  │
+│  stuck activities                │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Activity 5: Wait for Confirmation│
+│                                  │
+│  Poll PSP settlement status      │
+│  Or wait for webhook callback    │
+│  Timeout: 48 hours              │
+│                                  │
+│  If timeout: emit alert, manual  │
+│  review required                 │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Activity 6: Post Ledger Entries │
+│                                  │
+│  For confirmed settlements:      │
+│  DR platform_payable             │
+│  CR bank_operating               │
+│                                  │
+│  Update batch status: CONFIRMED  │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Emit Event: settlement.completed │
+│                                  │
+│  Publish to Kafka topic for      │
+│  downstream consumers            │
+│  (reconciliation, audit, notify) │
+└─────────────────────────────────┘
+```
+
+**Why Temporal over Celery for settlement:**
+
+- **Durability**: Workflow state survives worker crashes. If a worker dies during Activity 4 (PSP submission), Temporal resumes from exactly where it left off, not from the start.
+- **Visibility**: Query workflow status in real-time. Stakeholders can see "settlement batch 2025-03-08-001 is waiting for PSP confirmation (4.2 hours)" without logs.
+- **Checkpointing**: Each activity completes atomically. If PSP responds with "payment submitted but I can't confirm immediately," Temporal stores that state and retries the confirmation activity without re-submitting.
+- **Timeout handling**: Temporal's timeout semantics are precise. "Wait for PSP confirmation with 48-hour timeout" is declarative code, not a cron job that might miss the deadline.
+
+### 2.5 Settlement Service
+
+Calculates who owes whom, batches transactions for efficiency, and generates settlement instructions for the payment service to execute. Runs as a Temporal workflow consumer.
 
 ```
 Settlement Pipeline (runs on schedule or triggered by events)
@@ -452,7 +567,7 @@ Settlement Pipeline (runs on schedule or triggered by events)
 └─────────────────────────────────┘
 ```
 
-### 2.4 Fraud Service
+### 2.6 Fraud Service
 
 Synchronous rule evaluation in the transaction path (< 100ms) plus async analysis for borderline cases. The fraud service never blocks or modifies a ledger entry directly. It returns a decision (approve, review, decline) to the API gateway, which then decides whether to proceed with the ledger write.
 
@@ -540,7 +655,7 @@ Transaction Context
 
 **Why rules before ML:** We need fraud detection on day one. An ML model needs labeled training data (confirmed fraud vs. legitimate transactions). The rule engine generates labels and collects features. After 6+ months of data collection, we can train a model that uses the same features but learns non-obvious patterns that rules miss. The rule engine stays as a fast pre-filter even after ML is deployed.
 
-### 2.5 Reconciliation Service
+### 2.7 Reconciliation Service
 
 Runs as a nightly batch job. Compares three data sources to verify that all money is accounted for.
 
@@ -657,7 +772,7 @@ Nightly Trigger (2:00 AM ET)
 └─────────────────────────────────┘
 ```
 
-### 2.6 Compliance Service
+### 2.8 Compliance Service
 
 Runs both synchronously (OFAC screening before outbound transfers) and asynchronously (transaction monitoring, KYC workflows).
 
@@ -1029,39 +1144,43 @@ CREATE INDEX idx_compliance_events_user ON compliance_events(user_id, created_at
 └─────────────────────────────────────────────────┘
 ```
 
-### 4.2 Event-Driven Communication
+### 4.2 Event-Driven Communication (Apache Kafka)
 
-Services communicate through events for anything that doesn't need a synchronous response. This decouples services and creates a natural audit trail.
+Services communicate through Kafka topics for anything that doesn't need a synchronous response. This decouples services and creates a natural audit trail. See section 2.3 for detailed Kafka architecture.
 
 ```
-┌──────────────┐                ┌──────────────────────────────────┐
-│ Ledger       │                │           Redis Streams           │
-│ Service      │──publishes──>  │                                   │
-│              │                │  Stream: transactions              │
-└──────────────┘                │  ├── transaction.created           │
-                                │  ├── transaction.settled           │
-┌──────────────┐                │  ├── transaction.failed            │
-│ Payment      │──publishes──>  │  ├── payment.submitted             │
-│ Service      │                │  ├── payment.confirmed             │
-└──────────────┘                │  ├── payment.failed                │
-                                │  │                                 │
-┌──────────────┐                │  Stream: fraud                     │
-│ Fraud        │──publishes──>  │  ├── fraud.approved                │
-│ Service      │                │  ├── fraud.flagged                 │
-└──────────────┘                │  ├── fraud.declined                │
-                                │  │                                 │
-┌──────────────┐                │  Stream: compliance                │
-│ Compliance   │──publishes──>  │  ├── compliance.alert              │
-│ Service      │                │  ├── compliance.sar_triggered      │
-└──────────────┘                │  └── compliance.kyc_updated        │
-                                │                                   │
-                                │  Consumers:                       │
-                                │  ├── Notification service          │
-                                │  ├── Settlement service            │
-                                │  ├── Analytics/reporting           │
-                                │  └── Compliance monitoring         │
-                                └──────────────────────────────────┘
+┌──────────────┐                ┌──────────────────────────────────────┐
+│ Ledger       │                │      Apache Kafka Cluster             │
+│ Service      │──publishes──>  │                                       │
+│              │                │  Topic: transactions                   │
+└──────────────┘                │  ├── Partition 0 (account_id % 10==0) │
+                                │  ├── Partition 1 (account_id % 10==1) │
+┌──────────────┐                │  ├── ...                              │
+│ Payment      │──publishes──>  │  └── Partition 9 (account_id % 10==9) │
+│ Service      │                │                                       │
+└──────────────┘                │  Topic: settlement                     │
+                                │  ├── Partition 0-2 (load balanced)    │
+┌──────────────┐                │                                       │
+│ Fraud        │──publishes──>  │  Topic: fraud                         │
+│ Service      │                │  ├── Partition 0-1 (fraud consumers)  │
+└──────────────┘                │                                       │
+                                │  Topic: compliance                     │
+┌──────────────┐                │  ├── Partition 0-1 (7-year retention) │
+│ Compliance   │──publishes──>  │                                       │
+│ Service      │                │  Consumers:                           │
+└──────────────┘                │  ├── Settlement Orchestrator (Temporal)│
+                                │  ├── Fraud review queue (async)       │
+                                │  ├── Compliance monitoring (real-time) │
+                                │  ├── Notification service             │
+                                │  ├── Analytics/reporting              │
+                                │  └── Archive to S3 (compliance)       │
+                                └──────────────────────────────────────┘
 ```
+
+**Kafka guarantees:**
+- At-least-once delivery: Consumers must be idempotent (deduplicate via transaction ID + idempotency key)
+- Ordered within partition: All transactions for account X are processed sequentially
+- Durable: 7-year retention for compliance topics; 30-day retention for operational topics
 
 ---
 
@@ -1218,14 +1337,159 @@ The finance ops dashboard shows real-time financial health. These aren't vanity 
 
 ---
 
-## 8. Technology Selection Summary
+## 8. Monitoring and Observability (Datadog)
+
+Unified observability across logs, metrics, traces, and APM. Datadog is critical for regulated environments because it provides audit trails and compliance-ready dashboards.
+
+### 8.1 Infrastructure Monitoring
+
+**Host Metrics:**
+- CPU, memory, disk utilization on all servers
+- Network throughput and packet loss
+- Container metrics (ECS/Kubernetes) if using orchestration
+
+**Database Monitoring:**
+- Query latency (p50, p95, p99)
+- Slow query log analysis
+- Lock wait times and deadlock detection (critical for SERIALIZABLE isolation)
+- Connection pool utilization
+- Replication lag (for Multi-AZ PostgreSQL)
+
+**Application Metrics (Python/FastAPI):**
+- Request latency by endpoint (p50, p95, p99)
+- Request count by status code (200, 4xx, 5xx)
+- Error rate and error types
+- Worker process health (Celery, Temporal workers)
+- Memory leaks (via heap profiling)
+
+### 8.2 Business Metrics (Custom Metrics)
+
+Sent via Datadog's StatsD client or APM instrumentalization:
+
+```python
+# In ledger_engine.py
+statsd.gauge('fintech.ledger.active_holds', total_holds)
+statsd.gauge('fintech.ledger.posted_balance', user_balance)
+
+# In payment_orchestrator.py
+statsd.increment('fintech.payment.psp_attempt', tags=[f'psp:{psp_name}'])
+statsd.timing('fintech.payment.execution_time', elapsed_ms, tags=[f'psp:{psp_name}'])
+
+# In fraud_detector.py
+statsd.increment('fintech.fraud.rule_triggered', tags=[f'rule:{rule_name}'])
+statsd.gauge('fintech.fraud.review_queue_depth', review_queue_count)
+
+# In settlement_engine.py
+statsd.gauge('fintech.settlement.daily_volume', settlement_amount)
+statsd.increment('fintech.settlement.batch_created', tags=[f'status:{batch_status}'])
+
+# In reconciliation_engine.py
+statsd.gauge('fintech.recon.match_rate_percent', match_rate * 100)
+statsd.gauge('fintech.recon.exception_count', exception_count)
+```
+
+### 8.3 APM (Application Performance Monitoring)
+
+Datadog APM traces the full request lifecycle:
+
+```
+Client Request
+      │
+      ▼
+┌──────────────────────────────────────────┐
+│ Trace ID: 0x1234abcd (generated once)    │
+│ Span 1: API Gateway (FastAPI middleware) │
+│  ├── Span 2: Auth verification          │
+│  ├── Span 3: Rate limiting check         │
+│  ├── Span 4: Idempotency lookup          │
+│  └── Span 5: Fraud check                 │
+│      ├── Span 5.1: Feature extraction    │
+│      └── Span 5.2: Rule evaluation       │
+│  └── Span 6: Ledger write                │
+│      ├── Span 6.1: DB transaction start  │
+│      ├── Span 6.2: Balance calculation   │
+│      └── Span 6.3: Journal entry insert  │
+└──────────────────────────────────────────┘
+      │
+      ▼
+Response
+```
+
+Each span captures:
+- Timing (start, end, duration)
+- Service name (api, ledger, fraud, payment, etc.)
+- Resource (SQL query, HTTP endpoint, function name)
+- Tags (user_id, txn_id, psp_name, etc.)
+- Errors (exception type, stacktrace, error message)
+
+**Why APM matters for fintech:** When a user reports "my transfer took 8 seconds," the APM trace shows exactly where the time was spent: was it auth (likely misconfiguration), fraud check (rule took too long), or ledger write (database slow)? This beats logs by orders of magnitude.
+
+### 8.4 Log Aggregation
+
+All service logs stream to Datadog:
+
+```
+FastAPI app logs
+└─> Datadog Agent (runs on host)
+    └─> Datadog Logs API
+        └─> Datadog Logs UI
+```
+
+**Log Level Strategy:**
+
+- **DEBUG**: Feature flags, cache hits/misses, feature extraction details (disabled in prod)
+- **INFO**: Transaction state transitions, fraud decisions, settlement events, API requests (enabled)
+- **WARNING**: Retry attempts, circuit breaker state changes, reconciliation exceptions (enabled)
+- **ERROR**: Transaction failures, database errors, PSP errors (enabled, page on-call)
+- **CRITICAL**: Ledger invariant violations, double-entry check failures (enabled, immediate page)
+
+**Structured Logging (JSON):**
+
+```python
+import logging
+import json
+
+logger = logging.getLogger(__name__)
+
+def create_transaction(txn_id, amount, user_id):
+    logger.info(json.dumps({
+        "event": "transaction.created",
+        "txn_id": txn_id,
+        "amount": amount,
+        "user_id": user_id,
+        "timestamp": datetime.utcnow().isoformat(),
+        "service": "api",
+        "environment": os.getenv("ENVIRONMENT")
+    }))
+```
+
+Structured logs enable filtering in Datadog: `service:api AND event:transaction.created AND amount:[500 TO 1000]`
+
+### 8.5 Alerts and Incident Response
+
+Datadog alert rules trigger PagerDuty incidents:
+
+| Alert | Threshold | Action |
+|-------|-----------|--------|
+| Ledger invariant violation | Any | Page on-call immediately (SEV-1) |
+| Transaction success rate < 95% | 5 minutes | Page on-call (SEV-2) |
+| PSP error rate > 10% | 5 minutes | Page on-call (SEV-2) |
+| Circuit breaker OPEN | Any | Notify Slack #fintech-alerts (SEV-3) |
+| Reconciliation match rate < 97% | After run | Notify Diana (Finance Ops) |
+| Fraud rule latency > 100ms (p95) | 15 minutes | Notify #fintech-alerts for investigation |
+| Database connection pool > 80% | 10 minutes | Notify on-call (potential capacity issue) |
+
+---
+
+## 9. Technology Selection Summary
 
 | Component | Choice | Alternatives Evaluated | Decision Driver |
 |---|---|---|---|
 | API | FastAPI | Express, Django REST | Async Python; Pydantic for financial data validation; native OpenAPI docs |
-| Database | PostgreSQL 15 | MySQL, CockroachDB | SERIALIZABLE isolation for ledger; mature ACID guarantees; rich indexing |
-| Cache/Queue | Redis 7 | RabbitMQ, Kafka | Idempotency store + cache + queue + event streams in one system; simple operations |
-| Task Queue | Celery + Redis | Bull, Temporal | Python ecosystem; proven for batch jobs (settlement, reconciliation); Celery Beat for scheduling |
+| Database | AWS RDS PostgreSQL 15 | MySQL, CockroachDB, Supabase | Multi-AZ failover; SERIALIZABLE isolation; managed backups; compliance-ready |
+| Event Streaming | Apache Kafka | RabbitMQ, Redis Streams, AWS SQS | Partitioned by account_id for ordering; at-least-once delivery; long retention for audit |
+| Settlement Orchestration | Temporal | Celery, n8n, AWS Step Functions | Durable workflow execution; built-in retry/timeout; checkpointing; human-in-loop capable |
+| Cache/Queue | Redis 7 | RabbitMQ, Memcached | Idempotency store + fraud rule cache + rate limiting; simple operations |
 | Mobile | React Native (Expo) | Flutter, native iOS/Android | Shared codebase; fast iteration; Expo push notifications |
 | Web | Next.js + shadcn/ui | React SPA, Angular | SSR for data-heavy reconciliation tables; shadcn for full component control |
 | Primary PSP | Stripe | Square, Braintree | Best developer experience; native ACH + card; marketplace features from prior integration |
@@ -1233,4 +1497,4 @@ The finance ops dashboard shows real-time financial health. These aren't vanity 
 | Instant Transfers | Tabapay | Visa Direct (raw), Stripe Instant | Specialized in real-time payouts; lower cost for push-to-debit |
 | KYC Vendor | Alloy | Persona, Jumio | Orchestration layer (combines multiple data sources); configurable decision logic |
 | Secrets | AWS Secrets Manager | HashiCorp Vault, Azure Key Vault | Managed service; no self-hosting; native IAM integration |
-| Monitoring | Datadog | Grafana + Prometheus, New Relic | Unified APM + logs + metrics; financial services dashboard templates |
+| Monitoring & APM | Datadog | Grafana + Prometheus, New Relic, Splunk | Unified APM + logs + metrics; compliance-ready; built-in SLA tracking; PagerDuty integration |

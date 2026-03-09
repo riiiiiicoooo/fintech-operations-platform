@@ -11,12 +11,12 @@ Financial operations infrastructure for a B2B2C fintech platform. Covers double-
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| **Database** | PostgreSQL 15 (Supabase) + SERIALIZABLE isolation | Double-entry ledger with strict ACID guarantees |
+| **Database** | AWS RDS PostgreSQL 15 + SERIALIZABLE isolation | Double-entry ledger with strict ACID guarantees, Multi-AZ failover |
 | **API** | FastAPI (Python 3.11) + async/await | High-performance payment endpoints |
-| **Job Orchestration** | Trigger.dev | Long-running settlement & reconciliation jobs with checkpointing |
-| **Workflows** | n8n | Low-code alerting: reconciliation breaks → Jira/Slack/Email |
-| **Payment Gateway** | Stripe Connect + Python SDK | Multi-PSP routing, PaymentIntent, connected accounts |
-| **Monitoring** | Prometheus + Grafana | Real-time dashboards: transaction pipeline, reconciliation |
+| **Event Streaming** | Apache Kafka | Event-driven transaction lifecycle, decoupled service consumers |
+| **Settlement Orchestration** | Temporal | Durable workflows for settlement batching, retry/timeout handling |
+| **Payment Gateway** | Stripe Connect + Adyen + Tabapay | Multi-PSP routing, PaymentIntent, connected accounts |
+| **Monitoring** | Datadog | Unified APM + logs + metrics, real-time dashboards, incident alerting |
 | **Email** | React Email + Resend | Transactional emails: settlement confirmations, alerts |
 | **Infrastructure** | Docker + Vercel/Render | Containerized deployment with auto-scaling |
 | **Secrets** | HashiCorp Vault | Encrypted credential management |
@@ -43,20 +43,25 @@ python api/app.py
 # Install dependencies
 pip install -r requirements.txt
 
-# Set up PostgreSQL (or Supabase)
+# Set up PostgreSQL (AWS RDS or local instance)
 export DATABASE_URL="postgresql://user:pass@localhost:5432/fintech_ops"
 
 # Run migrations
 alembic upgrade head
 
+# Start Kafka (Docker)
+docker run -d --name kafka confluentinc/cp-kafka:latest \
+  -e KAFKA_ZOOKEEPER_CONNECT=localhost:2181 \
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+
+# Start Temporal server (Docker)
+docker run -d --name temporal-server temporalio/server:latest
+
 # Start API server
 python api/app.py
 
-# In another terminal: Run Trigger.dev jobs locally
-trigger-cli dev
-
-# In another terminal: Run n8n workflows
-docker run -it -p 5678:5678 n8nio/n8n
+# In another terminal: Run Temporal workers
+python -m src.settlement.temporal_worker
 
 # Visit http://localhost:8000/docs for API docs
 ```
@@ -64,18 +69,23 @@ docker run -it -p 5678:5678 n8nio/n8n
 ### Deploy to Production
 
 ```bash
-# Supabase (database)
-supabase link --project-ref your-project-id
-supabase db push
+# AWS RDS (database)
+# Configure via AWS Console or Terraform
+terraform apply -var="rds_identifier=fintech-ops-prod"
 
-# Vercel (API)
-vercel deploy
+# Deploy API to ECS/Fargate or EC2
+vercel deploy # or: docker push fintech-api:latest && aws ecs update-service
 
-# Trigger.dev (jobs)
-trigger deploy
+# Deploy Kafka cluster
+# Use AWS MSK (Managed Streaming for Kafka) or self-hosted
 
-# n8n (workflows)
-docker run -d n8nio/n8n --publish 5678:5678
+# Deploy Temporal cluster
+# Use Temporal Cloud or self-hosted on Kubernetes
+
+# Deploy Datadog agent
+docker run -d datadog/agent:latest \
+  -e DD_API_KEY=$DD_API_KEY \
+  -e DD_SITE=datadoghq.com
 ```
 
 ---
@@ -475,7 +485,7 @@ fintech-operations-platform/
 | Development (Lead + Offshore) | $232,800 | Core platform build |
 | QA | $17,500 | Quality assurance and testing |
 | AI/LLM Token Budget | $280/month | Minimal AI — fraud scoring uses scikit-learn not LLMs, some Claude Haiku for pattern summarization ~2M tokens/month |
-| Infrastructure | $890/month | Supabase Pro $25 + Temporal Cloud $200 + Redis $65 + n8n $50 + Trigger.dev $25 + AWS (RDS, compute, S3) $350 + Grafana $50 + misc $125 |
+| Infrastructure | $1,200/month | AWS RDS PostgreSQL $240 + Temporal Cloud $200 + Redis $65 + Kafka (MSK) $650 + Datadog APM $500 + misc $95 + AWS compute $200 |
 | **Total Engagement** | **$345,000** | Fixed-price, phases billed at milestones |
 | **Ongoing Run Rate** | **$1,400/month** | Infrastructure + AI tokens + support + Stripe Connect fees (0.25% + $0.25 per payout, variable) |
 
